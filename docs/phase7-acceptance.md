@@ -13,7 +13,7 @@ arb = 0xA8B start at 0.
 
 ## Results
 
-`forge test` (full suite): **136 passed, 0 failed, 4 skipped** (skips are
+`forge test` (full suite): **136 passed, 0 failed, 4 skipped** (count at Phase 7; the current full suite is 203 + 4 fork-skip) (skips are
 pre-existing). Journey contract alone: 5/5 pass.
 
 | Journey | Result | Test gas |

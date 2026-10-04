@@ -1,7 +1,7 @@
 # Phase 9 — Arbitration operations rehearsal record
 
 Status: 2026-10-03. `packages/contracts/test/e2e/Arbitration.t.sol` — **13/13 pass**
-(local EVM, full suite 151 passed / 4 fork-skipped). Reviewer-service and console
+(local EVM, full suite 151 passed / 4 fork-skipped at that phase; current is 203 / 4). Reviewer-service and console
 tests are covered in `apps/api/test/review.test.mjs` and
 `apps/web/test/review.test.mjs`.
 

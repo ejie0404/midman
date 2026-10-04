@@ -1,6 +1,6 @@
 # Phase 5 — Verification record and requirement coverage
 
-Status: 2026-10-03. `forge build` clean, `forge test`: **163 passed, 4 fork-skip (167 total, 10 suites)**
+Status: 2026-10-03. `forge build` clean, `forge test`: **203 passed, 4 fork-skip (207 total, 13 suites)**
 (current count; this file records the Phase 5 baseline of 135), plus spec model PASS (567,700 cases).
 Invariant config: 64 runs × depth 20 (1,280 calls/run, both invariants hold).
 

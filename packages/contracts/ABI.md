@@ -1,7 +1,7 @@
 # Phase 4 — Contract implementation record (MidmanHub system)
 
 Status: implemented 2026-10-03. `forge build` clean (solc 0.8.26, via-IR,
-optimizer 200). `forge test`: **163/163 pass, 4 fork-skip (167 total)**. Sizes: Hub 19,595 / Lib 18,211
+optimizer 200). `forge test`: **203/203 pass, 4 fork-skip (207 total)**. Sizes: Hub 19,595 / Lib 18,211
 bytes (EIP-170 limit 24,576). Dependencies: OpenZeppelin 5.0.2 (EIP712, ECDSA,
 IERC1271, ReentrancyGuard, SafeERC20, Math.mulDiv), forge-std (tests only).
 

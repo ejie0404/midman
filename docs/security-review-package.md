@@ -11,9 +11,12 @@ Evidence baseline (verified on this checkout):
 | Check | Command | Result |
 |---|---|---|
 | Spec/model | `node specs/validate-spec.mjs` | `PASS`, 567,700 model cases, `releaseBlockers: 9` (all 9 allocated RB-01..RB-09) |
-| Node suites | `pnpm -r test` | 193 pass / 0 fail (api 72, web 47, worker 57, shared 10, store 2, chain 5) |
-| Contract suites | `forge test` | 163 pass / 0 fail / 4 fork-skip (167 total) |
+| Node suites | `pnpm -r test` | 486 pass / 0 fail (api 153, web 100, worker 93, chain 24, api-client 46, shared 10, store 60) |
+| Script suites | `pnpm test:scripts` | 57 pass / 0 fail (policy-hash, manifest, readiness, export-abi, verify-deployment) |
+| Contract suites | `forge test` | 203 pass / 0 fail / 4 fork-skip (207 total) |
+| Anvil E2E | `pnpm e2e:anvil` | deploy + live release verification PASS (36 checks, 0 fail) |
 | Fork suites | `BASE_RPC_URL=... forge test` | 4 fork tests against pinned Base block 52126164 |
+| Dependency audit | `pnpm audit` | 0 critical, 0 high, 1 moderate (accepted) |
 
 ---
 
