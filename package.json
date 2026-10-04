@@ -18,6 +18,7 @@
     "verify:manifest:strict": "node scripts/verify-manifest.mjs deploy/manifest.example.json --strict",
     "drills": "node scripts/run-drills.mjs",
     "verify:deployment": "node scripts/verify-deployment.mjs",
+    "e2e:anvil": "node scripts/e2e-anvil.mjs",
     "readiness": "node scripts/readiness.mjs",
     "db:migrate": "pnpm --filter @midman/api db:migrate"
   },

@@ -15,3 +15,4 @@ packages/contracts/cache/
 packages/contracts/broadcast/
 # Data volumes
 data/
+deploy/manifest.31337.json

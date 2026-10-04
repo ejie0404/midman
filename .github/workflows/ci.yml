@@ -37,3 +37,6 @@ jobs:
         env:
           # Fork suite self-skips when unset; set this secret for full RB-06 evidence.
           BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
+      # Live deploy + release-verification on a throwaway anvil chain.
+      - run: node scripts/export-abi.mjs
+      - run: node scripts/e2e-anvil.mjs

@@ -193,6 +193,14 @@ async function read(client, address, abi, functionName, args = []) {
   return client.readContract({ address, abi, functionName, args });
 }
 
+/// @notice viem renamed getCode -> getBytecode across versions; support both so
+/// the live path works regardless of the pinned viem minor.
+async function getCodeCompat(client, address) {
+  if (typeof client.getCode === "function") return client.getCode({ address });
+  if (typeof client.getBytecode === "function") return client.getBytecode({ address });
+  throw new Error("rpc client exposes neither getCode nor getBytecode");
+}
+
 /// @notice Verify a deployed manifest against live chain state. `options.client`
 /// must expose getCode({address}) and readContract({address, abi, functionName,
 /// args}); viem's PublicClient satisfies both, and tests inject a stub.
@@ -227,7 +235,7 @@ export async function verifyDeployment(manifest, options = {}) {
   let policiesCode;
   if (ADDRESS_RE.test(typeof hub === 'string' ? hub : '')) {
     try {
-      hubCode = await client.getCode({ address: hub });
+      hubCode = await getCodeCompat(client, hub);
     } catch (error) {
       bad('code.hub', errMessage(error));
     }
@@ -235,7 +243,7 @@ export async function verifyDeployment(manifest, options = {}) {
   }
   if (ADDRESS_RE.test(typeof policies === 'string' ? policies : '')) {
     try {
-      policiesCode = await client.getCode({ address: policies });
+      policiesCode = await getCodeCompat(client, policies);
     } catch (error) {
       bad('code.policies', errMessage(error));
     }
