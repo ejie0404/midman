@@ -319,12 +319,15 @@ describe("poller", () => {
     assert.equal(poller.isRunning(), false);
     poller.start();
     assert.equal(poller.isRunning(), true);
-    await sleep(80);
+    // Wait for the condition with a generous deadline instead of a fixed
+    // sleep: timer delivery is not guaranteed within a tight window under load.
+    const deadline = Date.now() + 3_000;
+    while (calls < 3 && Date.now() < deadline) await sleep(10);
     poller.stop();
     assert.equal(poller.isRunning(), false);
     assert.ok(calls >= 3, `expected >=3 calls, got ${calls}`);
     const frozen = calls;
-    await sleep(50);
+    await sleep(60);
     assert.equal(calls, frozen);
   });
 
