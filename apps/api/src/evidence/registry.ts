@@ -3,6 +3,17 @@
 // lands later — see 003_evidence.sql. Each entry chains prevHash == head,
 // seq == count, so reviewers can verify the chain off-platform.
 //
+// Round-2 Phase 6 additions:
+//   * `appendManifestAtomic` commits the durable manifest write BEFORE it is
+//     acknowledged, coalesces concurrent retries for the same content hash,
+//     and is idempotent (a retry with the same fileHash never duplicates an
+//     entry). `attachReceiptAtomic` is the receipt counterpart.
+//   * `consumeAuthNonce`/`hasAuthNonce` durably record metadata-bound signed
+//     request nonces so a replayed signature is rejected across restarts.
+//   * `recordAudit`/`getAudit` keep the authenticated export/access audit
+//     trail (redacted), and `recordPurgeOutcome`/`getPurgeOutcomes` record
+//     retention deletion outcomes while tombstones preserve the manifest.
+//
 // Retention hooks: per-deal settlement timestamps, dual-role purge
 // approvals (ops + arbitration), and blob-purge tombstones. Purge deletes
 // ciphertext via the blob store but NEVER deletes manifest entries — the
@@ -23,9 +34,17 @@ const MANIFEST_NS = "evidence.manifest";
 const PURGE_NS = "evidence.purge-approvals";
 const SETTLEMENT_NS = "evidence.settlement";
 const TOMBSTONE_NS = "evidence.tombstones";
+const NONCE_NS = "evidence.auth-nonces";
+const AUDIT_NS = "evidence.audit";
+const PURGE_OUTCOME_NS = "evidence.purge-outcomes";
+
+/** Nonce scope key; nonces are globally unique so a single bucket suffices. */
+const NONCE_SCOPE = "auth";
+
+export type ScanStatus = "pending" | "clean" | "infected" | "deferred" | "error";
 
 export interface ScanRecord {
-  readonly status: "clean" | "infected" | "deferred" | "error";
+  readonly status: ScanStatus;
   readonly detail?: string;
 }
 
@@ -33,6 +52,10 @@ export interface ReceiptRef {
   readonly payload: string;
   readonly signature: string;
   readonly signer: string;
+  /** Stable receipt signer key id (resolvable after rotation). */
+  readonly keyId?: string;
+  /** Receipt format version. */
+  readonly version?: number;
 }
 
 export interface AppendManifestInput {
@@ -82,6 +105,45 @@ export interface BlobTombstone {
   readonly purgedAt: number;
 }
 
+export interface UsedNonce {
+  readonly nonce: string;
+  readonly dealId: string;
+  readonly expiresAt: number;
+  readonly at: string;
+}
+
+export interface AuthNonceInput {
+  readonly nonce: string;
+  readonly dealId: string;
+  readonly expiresAt: number;
+  readonly now?: number;
+}
+
+export interface EvidenceAuditRecord {
+  readonly id: string;
+  readonly at: string;
+  readonly actor: string;
+  readonly action: string;
+  readonly dealId: string;
+  readonly target?: string;
+  readonly reason?: string;
+  readonly detail?: string;
+}
+
+export interface PurgeOutcome {
+  readonly dealId: string;
+  readonly fileHash: string;
+  readonly outcome: "purged" | "skipped" | "error";
+  readonly reason?: string;
+  readonly at: number;
+}
+
+export interface AtomicAppendResult {
+  readonly entry: ManifestEntry;
+  /** False when an existing identical-content entry was returned (retry). */
+  readonly created: boolean;
+}
+
 /** Genesis prevHash for the first manifest entry of a deal. */
 export const GENESIS_PREVHASH = `0x${"00".repeat(32)}`;
 
@@ -94,11 +156,42 @@ function httpError(statusCode: number, message: string): Error & { statusCode: n
   return Object.assign(new Error(message), { statusCode });
 }
 
+function scanStatusOf(entry: { quarantined?: boolean; scan?: { status?: string } } | undefined): string {
+  if (!entry) return "missing";
+  if (entry.quarantined === true) return "quarantined";
+  return entry.scan?.status ?? "pending";
+}
+
+/** True for scan states that must never be served or acknowledged as usable. */
+export function isBlockedScanState(state: string): boolean {
+  return state === "infected" || state === "quarantined" || state === "pending" || state === "error";
+}
+
+/** True for scan states a normal party download may serve (never claims clean). */
+export function isServableScanState(state: string): boolean {
+  return state === "clean" || state === "deferred";
+}
+
 export interface ManifestRegistry {
   appendManifest(dealId: string, input: AppendManifestInput): ManifestEntry;
+  /** Authoritative + idempotent append; awaits the durable commit. */
+  appendManifestAtomic(dealId: string, input: AppendManifestInput): Promise<AtomicAppendResult>;
   getManifest(dealId: string): ManifestEntry[];
   getHead(dealId: string): string;
+  getByFileHash(dealId: string, fileHash: string): ManifestEntry | null;
   attachReceipt(dealId: string, seq: number, receipt: ReceiptRef): ManifestEntry;
+  /** Authoritative receipt attachment (awaits the durable write). */
+  attachReceiptAtomic(dealId: string, seq: number, receipt: ReceiptRef): Promise<ManifestEntry>;
+  /** Consume a signed-request nonce. Returns false on replay (durable). */
+  consumeAuthNonce(input: AuthNonceInput): Promise<boolean>;
+  hasAuthNonce(nonce: string, now?: number): boolean;
+  recordAudit(
+    record: Omit<EvidenceAuditRecord, "id" | "at"> & { id?: string; at?: string },
+  ): EvidenceAuditRecord;
+  getAudit(dealId: string): EvidenceAuditRecord[];
+  getAllAudit(): EvidenceAuditRecord[];
+  recordPurgeOutcome(outcome: Omit<PurgeOutcome, "at"> & { at?: number }): PurgeOutcome;
+  getPurgeOutcomes(dealId: string): PurgeOutcome[];
   recordPurgeApproval(dealId: string, approval: { role: "ops" | "arbitration"; signature?: string }): PurgeApproval[];
   /** Plural alias of recordPurgeApproval. */
   recordPurgeApprovals(dealId: string, approval: { role: "ops" | "arbitration"; signature?: string }): PurgeApproval[];
@@ -122,6 +215,10 @@ export class InMemoryManifestRegistry implements ManifestRegistry {
   private readonly tombstones = new DurableCollection<BlobTombstone>(TOMBSTONE_NS, this.writer, (tomb) =>
     tomb.fileHash.toLowerCase(),
   );
+  private readonly authNonces = new Map<string, number>();
+  private readonly audits = new Map<string, EvidenceAuditRecord[]>();
+  private readonly purgeOutcomes = new Map<string, PurgeOutcome[]>();
+  private readonly appendInflight = new Map<string, Promise<AtomicAppendResult>>();
 
   /** Attach the durability adapter (see configureRegistry). */
   setAdapter(adapter: RegistryAdapter | null): void {
@@ -146,20 +243,18 @@ export class InMemoryManifestRegistry implements ManifestRegistry {
       const latest = values[values.length - 1];
       if (typeof latest === "number") this.settlements.set(dealId, latest);
     });
+    await hydrateNamespace<UsedNonce>(adapter, NONCE_NS, undefined, (_dealId, values) => {
+      for (const value of values) this.authNonces.set(value.nonce.toLowerCase(), value.expiresAt);
+    });
+    await hydrateNamespace<EvidenceAuditRecord>(adapter, AUDIT_NS, dealIds, (dealId, values) => {
+      this.audits.set(dealId, values);
+    });
+    await hydrateNamespace<PurgeOutcome>(adapter, PURGE_OUTCOME_NS, dealIds, (dealId, values) => {
+      this.purgeOutcomes.set(dealId, values);
+    });
   }
 
-  appendManifest(dealId: string, input: AppendManifestInput): ManifestEntry {
-    if (input.kind !== "delivery" && input.kind !== "dispute") {
-      throw httpError(400, "kind must be delivery or dispute");
-    }
-    if (!/^0x[0-9a-fA-F]+$/.test(input.fileHash)) throw httpError(400, "Invalid fileHash");
-    const key = dealId.toLowerCase();
-    const list = this.entries.list(key);
-    const expectedPrev = list.length === 0 ? GENESIS_PREVHASH : (list[list.length - 1]?.head ?? GENESIS_PREVHASH);
-    if (input.prevHash.toLowerCase() !== expectedPrev.toLowerCase()) {
-      throw httpError(409, `prevHash mismatch: expected ${expectedPrev}`);
-    }
-    const seq = list.length;
+  private buildEntry(dealId: string, seq: number, input: AppendManifestInput): ManifestEntry {
     const entry: ManifestEntry = {
       dealId,
       seq,
@@ -177,8 +272,67 @@ export class InMemoryManifestRegistry implements ManifestRegistry {
       quarantined: input.quarantined ?? input.scan.status === "infected",
     };
     if (input.receipt !== undefined) entry.receipt = input.receipt;
+    return entry;
+  }
+
+  appendManifest(dealId: string, input: AppendManifestInput): ManifestEntry {
+    if (input.kind !== "delivery" && input.kind !== "dispute") {
+      throw httpError(400, "kind must be delivery or dispute");
+    }
+    if (!/^0x[0-9a-fA-F]+$/.test(input.fileHash)) throw httpError(400, "Invalid fileHash");
+    const key = dealId.toLowerCase();
+    const list = this.entries.list(key);
+    const expectedPrev = list.length === 0 ? GENESIS_PREVHASH : (list[list.length - 1]?.head ?? GENESIS_PREVHASH);
+    if (input.prevHash.toLowerCase() !== expectedPrev.toLowerCase()) {
+      throw httpError(409, `prevHash mismatch: expected ${expectedPrev}`);
+    }
+    const seq = list.length;
+    const entry = this.buildEntry(dealId, seq, input);
     void this.entries.set(key, orderedKey(seq), entry);
     return { ...entry };
+  }
+
+  getByFileHash(dealId: string, fileHash: string): ManifestEntry | null {
+    const found = this.entries
+      .list(dealId.toLowerCase())
+      .find((entry) => entry.fileHash.toLowerCase() === fileHash.toLowerCase());
+    return found ? { ...found } : null;
+  }
+
+  /**
+   * Authoritative, idempotent append. Concurrent calls for the same content
+   * hash coalesce; a retry after a committed append returns the existing entry
+   * without creating a duplicate or touching the chain head.
+   */
+  appendManifestAtomic(dealId: string, input: AppendManifestInput): Promise<AtomicAppendResult> {
+    const existing = this.getByFileHash(dealId, input.fileHash);
+    if (existing) return Promise.resolve({ entry: existing, created: false });
+    const lockKey = `${dealId.toLowerCase()}|${input.fileHash.toLowerCase()}`;
+    const inflight = this.appendInflight.get(lockKey);
+    if (inflight) return inflight;
+    const promise = this.doAppendAtomic(dealId, input).finally(() => this.appendInflight.delete(lockKey));
+    this.appendInflight.set(lockKey, promise);
+    return promise;
+  }
+
+  private async doAppendAtomic(dealId: string, input: AppendManifestInput): Promise<AtomicAppendResult> {
+    if (input.kind !== "delivery" && input.kind !== "dispute") {
+      throw httpError(400, "kind must be delivery or dispute");
+    }
+    if (!/^0x[0-9a-fA-F]+$/.test(input.fileHash)) throw httpError(400, "Invalid fileHash");
+    const key = dealId.toLowerCase();
+    const list = this.entries.list(key);
+    const expectedPrev = list.length === 0 ? GENESIS_PREVHASH : (list[list.length - 1]?.head ?? GENESIS_PREVHASH);
+    if (input.prevHash.toLowerCase() !== expectedPrev.toLowerCase()) {
+      throw httpError(409, `prevHash mismatch: expected ${expectedPrev}`);
+    }
+    // Re-check after any awaits above: a concurrent caller may have committed.
+    const raced = this.getByFileHash(dealId, input.fileHash);
+    if (raced) return { entry: raced, created: false };
+    const seq = list.length;
+    const entry = this.buildEntry(dealId, seq, input);
+    await this.entries.setAuthoritative(key, orderedKey(seq), entry);
+    return { entry: { ...entry }, created: true };
   }
 
   getManifest(dealId: string): ManifestEntry[] {
@@ -197,6 +351,90 @@ export class InMemoryManifestRegistry implements ManifestRegistry {
     entry.receipt = receipt;
     void this.entries.set(key, orderedKey(seq), entry);
     return { ...entry };
+  }
+
+  async attachReceiptAtomic(dealId: string, seq: number, receipt: ReceiptRef): Promise<ManifestEntry> {
+    const key = dealId.toLowerCase();
+    const entry = this.entries.get(key, orderedKey(seq));
+    if (!entry) throw httpError(404, "Manifest entry not found");
+    entry.receipt = receipt;
+    await this.entries.setAuthoritative(key, orderedKey(seq), entry);
+    return { ...entry };
+  }
+
+  async consumeAuthNonce(input: AuthNonceInput): Promise<boolean> {
+    const key = input.nonce.toLowerCase();
+    const now = input.now ?? Math.floor(Date.now() / 1_000);
+    const previous = this.authNonces.get(key);
+    if (previous !== undefined && previous > now) return false;
+    this.authNonces.set(key, input.expiresAt);
+    try {
+      await this.writer.put(NONCE_NS, NONCE_SCOPE, key, {
+        nonce: key,
+        dealId: input.dealId,
+        expiresAt: input.expiresAt,
+        at: new Date().toISOString(),
+      } satisfies UsedNonce);
+    } catch (error) {
+      if (previous === undefined) this.authNonces.delete(key);
+      else this.authNonces.set(key, previous);
+      throw error;
+    }
+    return true;
+  }
+
+  hasAuthNonce(nonce: string, now: number = Math.floor(Date.now() / 1_000)): boolean {
+    const expiry = this.authNonces.get(nonce.toLowerCase());
+    return expiry !== undefined && expiry > now;
+  }
+
+  recordAudit(
+    record: Omit<EvidenceAuditRecord, "id" | "at"> & { id?: string; at?: string },
+  ): EvidenceAuditRecord {
+    const key = record.dealId.toLowerCase();
+    const list = this.audits.get(key) ?? [];
+    const entry: EvidenceAuditRecord = {
+      id: record.id ?? `audit-${Date.now().toString(36)}-${list.length}`,
+      at: record.at ?? new Date().toISOString(),
+      actor: record.actor,
+      action: record.action,
+      dealId: record.dealId,
+      ...(record.target !== undefined ? { target: record.target } : {}),
+      ...(record.reason !== undefined ? { reason: record.reason } : {}),
+      ...(record.detail !== undefined ? { detail: record.detail } : {}),
+    };
+    list.push(entry);
+    this.audits.set(key, list);
+    void this.writer.put(AUDIT_NS, key, orderedKey(list.length - 1), entry);
+    return entry;
+  }
+
+  getAudit(dealId: string): EvidenceAuditRecord[] {
+    return [...(this.audits.get(dealId.toLowerCase()) ?? [])];
+  }
+
+  getAllAudit(): EvidenceAuditRecord[] {
+    return [...this.audits.values()].flat();
+  }
+
+  recordPurgeOutcome(outcome: Omit<PurgeOutcome, "at"> & { at?: number }): PurgeOutcome {
+    const key = outcome.dealId.toLowerCase();
+    const list = this.purgeOutcomes.get(key) ?? [];
+    const record: PurgeOutcome = {
+      dealId: outcome.dealId,
+      fileHash: outcome.fileHash,
+      outcome: outcome.outcome,
+      ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+      at: outcome.at ?? Math.floor(Date.now() / 1_000),
+    };
+    list.push(record);
+    this.purgeOutcomes.set(key, list);
+    void this.writer.put(PURGE_OUTCOME_NS, key, orderedKey(list.length - 1), record);
+    return record;
+  }
+
+  getPurgeOutcomes(dealId: string): PurgeOutcome[] {
+    return [...(this.purgeOutcomes.get(dealId.toLowerCase()) ?? [])];
   }
 
   recordPurgeApproval(
@@ -276,6 +514,9 @@ export class InMemoryManifestRegistry implements ManifestRegistry {
     return [...ids];
   }
 }
+
+// Re-exported for callers that inspect scan gating without importing routes.
+export { scanStatusOf };
 
 let sharedRegistry: InMemoryManifestRegistry | null = null;
 

@@ -1,10 +1,16 @@
 "use client";
 
 import { use, useEffect, useState } from "react";
-import { acceptDraft, getQuote, postSignature, ApiError, type QuoteResult } from "../../../../lib/api";
+import { getQuote, postSignature, ApiError, type QuoteResult } from "../../../../lib/api";
 import { formatUSDC } from "../../../../lib/money";
-import { CHAIN_ID, HUB_ADDRESS, getAccount, signAcceptance } from "../../../../lib/wallet";
-import { isHexAddress, readInviteTokenFromHash } from "../../../../lib/deal";
+import { CHAIN_ID, HUB_ADDRESS, getAccount, getWalletClient, signAcceptance } from "../../../../lib/wallet";
+import { isHexAddress } from "../../../../lib/deal";
+import {
+  acceptInvitationAsCounterparty,
+  clearInviteFromLocation,
+  readInviteToken,
+} from "../../../../lib/invite";
+import { getSession } from "../../../../lib/session";
 import { useDeal } from "../../../components/useDeal";
 import Money from "../../../components/Money";
 import { button, card, error, mono, nav, ok, page, secondaryButton, warning } from "../../../components/styles";
@@ -13,7 +19,9 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   const { id: routeId } = use(params);
   const draftId = decodeURIComponent(routeId);
   const view = useDeal(draftId);
-  const [invitePresent, setInvitePresent] = useState(false);
+  const [inviteToken, setInviteToken] = useState<string | null>(null);
+  const [sessionWallet, setSessionWallet] = useState<string | null>(null);
+  const [sessionExpiry, setSessionExpiry] = useState<number | null>(null);
   const [acceptAddress, setAcceptAddress] = useState("");
   const [signing, setSigning] = useState<"buyer" | "seller" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -42,18 +50,49 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   }
 
   useEffect(() => {
-    // Invitation token is read from the URL fragment only: displayed as
-    // present/absent, never logged and never sent to any endpoint.
-    setInvitePresent(readInviteTokenFromHash() !== null);
+    // Invitation token is read from the URL fragment only: it is never logged
+    // and never sent to any endpoint except the explicit accept POST.
+    setInviteToken(readInviteToken(window.location.hash));
+    let cancelled = false;
+    (async () => {
+      try {
+        const session = await getSession();
+        if (!cancelled && session.authenticated) {
+          setSessionWallet(session.wallet);
+          setSessionExpiry(session.expiresAt);
+        }
+      } catch {
+        // No session yet; the accept flow will sign in.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function accept() {
     setMessage(null);
     setFailure(null);
     try {
-      if (!isHexAddress(acceptAddress)) throw new Error("Counterparty address must be a 0x address");
-      await acceptDraft(draftId, acceptAddress);
-      setMessage("Acceptance recorded. Now collect both signatures below.");
+      if (!inviteToken) throw new Error("No invitation token in the URL fragment — open the private invite link.");
+      const account = await getAccount();
+      if (isHexAddress(acceptAddress) && acceptAddress.toLowerCase() !== account.toLowerCase()) {
+        throw new Error("The entered address does not match the connected wallet.");
+      }
+      const wallet = getWalletClient();
+      const signer = {
+        address: account,
+        signMessage: (m: string) => wallet.signMessage({ account, message: m }),
+      };
+      await acceptInvitationAsCounterparty({
+        draftId,
+        token: inviteToken,
+        signer,
+        chainId: Number(view.terms?.chainId ?? CHAIN_ID),
+      });
+      // Remove the token from the visible URL only AFTER the server accepted it.
+      clearInviteFromLocation(window.location, window.history);
+      setMessage("Invitation accepted with a signed wallet session. Now collect both signatures below.");
       window.location.reload();
     } catch (e) {
       setFailure(e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e));
@@ -141,14 +180,28 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
         <a href={`/deals/${routeId}`}>← Dashboard</a>
       </p>
 
-      {invitePresent ? (
-        <div style={ok}>Private invite link detected (token stays in the address bar fragment).</div>
+      {inviteToken ? (
+        <div style={ok}>Private invite link detected. It is kept in the URL fragment and sent only to the accept endpoint.</div>
       ) : (
         <div style={warning}>
-          No invite token in the URL fragment. You can still review, but only accept if you received the private
-          link out-of-band.
+          No invite token in the URL fragment. You can still review, but acceptance requires the private invite link.
         </div>
       )}
+
+      <div style={card}>
+        <h2>Wallet session</h2>
+        {sessionWallet ? (
+          <p style={{ fontSize: 14 }}>
+            Signed in as <span style={mono}>{sessionWallet}</span>
+            {sessionExpiry ? ` · session expires ${new Date(sessionExpiry * 1_000).toISOString()}` : ""}. Wallet
+            connection alone is not authentication — this session came from a personal_sign challenge.
+          </p>
+        ) : (
+          <p style={{ fontSize: 14 }}>
+            Not signed in. Accepting the invitation will issue a sign-in challenge and sign it with your wallet.
+          </p>
+        )}
+      </div>
 
       <div style={card}>
         <h2>Agreement summary (built from signed terms + exact quote)</h2>
@@ -234,16 +287,20 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
 
       <div style={card}>
         <h2>Accept (counterparty)</h2>
-        <p style={{ fontSize: 14 }}>Records your address on the draft. Must match the counterparty hint, if set.</p>
+        <p style={{ fontSize: 14 }}>
+          Reads the invitation token from the URL fragment, authenticates the intended wallet with a signed session,
+          and POSTs the token to the accept endpoint. The server rejects expired, revoked, consumed, or wrong-wallet
+          tokens. Must match the counterparty hint, if set.
+        </p>
         <input
           value={acceptAddress}
           onChange={(e) => setAcceptAddress(e.target.value)}
-          placeholder="0x…"
+          placeholder="0x… (confirm the connected counterparty wallet)"
           style={{ width: "100%", padding: 8, boxSizing: "border-box" }}
         />
         <div>
-          <button type="button" style={button} onClick={() => void accept()}>
-            Accept draft
+          <button type="button" style={button} disabled={!inviteToken} onClick={() => void accept()}>
+            Accept invitation
           </button>
           <button type="button" style={secondaryButton} onClick={download}>
             Download terms JSON

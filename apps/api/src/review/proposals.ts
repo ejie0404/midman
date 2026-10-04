@@ -7,7 +7,6 @@
 // on-chain settlementNonce: any bond posting or phase change invalidates the
 // nonce, so acceptance of a superseded proposal reverts on-chain. The console
 // never enforces liveness; the contract does.
-import { randomBytes } from "node:crypto";
 import { encodeFunctionData, recoverTypedDataAddress, type Address, type Hash, type Hex } from "viem";
 import { HUB_ABI, TYPES as EIP712_TYPES } from "@midman/chain";
 import { hydrateNamespace, RegistryWriter, type RegistryAdapter } from "@midman/store";
@@ -216,8 +215,25 @@ export function proposeSettlement(
   const agreementDigest =
     input.agreementDigest ?? (typeof chainDeal?.["termsHash"] === "string" ? (chainDeal["termsHash"] as string) : ZERO_NONCE);
   if (!BYTES32_RE.test(agreementDigest)) throw httpError(400, "Invalid agreementDigest");
-  const settlementNonce = input.settlementNonce ?? (`0x${randomBytes(32).toString("hex")}` as string);
-  if (!BYTES32_RE.test(settlementNonce)) throw httpError(400, "Invalid settlementNonce");
+
+  // The settlementNonce is AUTHORITATIVE chain state: it is the live counter
+  // that any bond posting or phase change invalidates. It MUST be supplied by
+  // the caller after reading it from the chain (never invented server-side — a
+  // random nonce splits the proposal off the on-chain counter and makes the
+  // countersignature uncompletable). A nonce that conflicts with the readable
+  // chain deal is rejected outright.
+  if (typeof input.settlementNonce !== "string" || !BYTES32_RE.test(input.settlementNonce)) {
+    throw httpError(400, "settlementNonce (live on-chain) is required; random or absent nonces are rejected");
+  }
+  const settlementNonce = input.settlementNonce;
+  const chainNonceRaw = chainDeal?.["settlementNonce"];
+  const chainNonce =
+    typeof chainNonceRaw === "string" && BYTES32_RE.test(chainNonceRaw) && !/^0x0+$/i.test(chainNonceRaw)
+      ? chainNonceRaw
+      : null;
+  if (chainNonce !== null && chainNonce.toLowerCase() !== settlementNonce.toLowerCase()) {
+    throw httpError(400, "settlementNonce conflicts with authoritative chain state");
+  }
   const nowSeconds = Math.floor(Date.now() / 1_000);
   const expiresRaw = input.expiresAt === undefined ? nowSeconds + 86_400 : input.expiresAt;
   const expiresStr = typeof expiresRaw === "number" ? String(expiresRaw) : expiresRaw;

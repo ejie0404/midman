@@ -10,6 +10,7 @@ import multipart = require("@fastify/multipart");
 import { createHash } from "node:crypto";
 import type { Address } from "viem";
 import {
+  canExportOriginal,
   declaredContentSha256,
   dealParty,
   reviewerCanAccess,
@@ -18,8 +19,13 @@ import {
   type DealPartyStore,
 } from "./access.js";
 import { getSharedBlobStore } from "./store.js";
-import { GENESIS_PREVHASH, getSharedRegistry } from "./registry.js";
-import { scanBytes, signReceipt } from "./receipts.js";
+import {
+  GENESIS_PREVHASH,
+  getSharedRegistry,
+  isBlockedScanState,
+  type ManifestEntry,
+} from "./registry.js";
+import { assertReceiptSignerConfigured, scanBytes, signReceipt, type SignedReceipt } from "./receipts.js";
 import { MAX_UPLOAD_BYTES, validateUpload } from "./uploadChecks.js";
 
 export interface EvidenceRouteDeps {
@@ -80,13 +86,35 @@ function requireContentBinding(): boolean {
   return raw === "1" || raw.toLowerCase() === "true";
 }
 
-/** True when a manifest entry must not be served (infected/quarantined). */
-function isQuarantined(entry: { quarantined?: boolean; scan?: { status?: string } } | undefined): boolean {
-  if (!entry) return false;
-  return entry.quarantined === true || entry.scan?.status === "infected";
+/**
+ * Normalized scan state. infected/quarantined/pending/error are not servable;
+ * clean/deferred are servable (deferred is NEVER relabeled clean).
+ */
+export function scanStateOf(entry: ManifestEntry | undefined): string {
+  if (!entry) return "missing";
+  if (entry.quarantined === true) return "quarantined";
+  return entry.scan.status;
+}
+
+function receiptRef(signed: SignedReceipt): {
+  payload: string;
+  signature: string;
+  signer: string;
+  keyId: string;
+  version: number;
+} {
+  return {
+    payload: signed.payload,
+    signature: signed.signature,
+    signer: signed.signer,
+    keyId: signed.keyId,
+    version: signed.version,
+  };
 }
 
 export function registerEvidenceRoutes(app: FastifyInstance, deps: EvidenceRouteDeps): void {
+  // Fail fast in production: a durable receipt signer must be configured.
+  assertReceiptSignerConfigured();
   void app.register(multipart, { limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 } });
 
   // POST /deals/:dealId/evidence — multipart {file, kind, description}.
@@ -134,12 +162,34 @@ export function registerEvidenceRoutes(app: FastifyInstance, deps: EvidenceRoute
       }
       const blobstore = getSharedBlobStore();
       const registry = getSharedRegistry();
+      // Object storage first (idempotent by content hash), then commit exactly
+      // one manifest entry, then issue the receipt. A retry of the same bytes
+      // converges on the existing entry instead of duplicating it.
       await blobstore.put(dealId, check.fileHash, fileBytes);
+
+      const existing = registry.getByFileHash(dealId, check.fileHash);
+      if (existing) {
+        let entry = existing;
+        if (!entry.receipt) {
+          const signed = await signReceipt({ dealId, seq: entry.seq, fileHash: check.fileHash });
+          entry = await registry.attachReceiptAtomic(dealId, entry.seq, receiptRef(signed));
+        }
+        return {
+          seq: entry.seq,
+          fileHash: check.fileHash,
+          commitment: entry.head,
+          receipt: entry.receipt ?? null,
+          duplicated: true,
+          quarantined: entry.quarantined,
+          scan: { status: entry.scan.status, detail: entry.scan.detail },
+        };
+      }
+
       // Malware hook: honestly recorded as deferred when ClamAV is unset.
       const scan = await scanBytes(fileBytes, filename);
       const quarantined = scan.status === "infected";
       const prevHash = registry.getHead(dealId);
-      const entry = registry.appendManifest(dealId, {
+      const { entry } = await registry.appendManifestAtomic(dealId, {
         uploader: wallet,
         kind,
         description,
@@ -151,13 +201,14 @@ export function registerEvidenceRoutes(app: FastifyInstance, deps: EvidenceRoute
         size: check.size,
         quarantined,
       });
-      const receipt = await signReceipt({ dealId, seq: entry.seq, fileHash: check.fileHash });
-      registry.attachReceipt(dealId, entry.seq, receipt);
+      const signed = await signReceipt({ dealId, seq: entry.seq, fileHash: check.fileHash });
+      await registry.attachReceiptAtomic(dealId, entry.seq, receiptRef(signed));
       return {
         seq: entry.seq,
         fileHash: check.fileHash,
         commitment: entry.head,
-        receipt,
+        receipt: receiptRef(signed),
+        duplicated: false,
         quarantined,
         scan: { status: scan.status, detail: scan.detail },
       };
@@ -179,31 +230,61 @@ export function registerEvidenceRoutes(app: FastifyInstance, deps: EvidenceRoute
   });
 
   // GET /evidence/:fileHash?dealId= — attachment download (party/reviewer).
-  app.get<{ Params: { fileHash: string }; Querystring: { dealId?: string } }>(
-    "/evidence/:fileHash",
-    async (req, reply) => {
-      try {
-        const dealId = req.query.dealId ?? "";
-        if (!dealId) return reply.code(400).send({ error: "Missing ?dealId=" });
-        await authPartyOrReviewer(req, dealId, deps);
-        const entry = getSharedRegistry()
-          .getManifest(dealId)
-          .find((candidate) => candidate.fileHash.toLowerCase() === req.params.fileHash.toLowerCase());
-        if (isQuarantined(entry)) {
+  // `?exportOriginal=1&reason=` is the exceptional audited original export.
+  app.get<{
+    Params: { fileHash: string };
+    Querystring: { dealId?: string; exportOriginal?: string; reason?: string };
+  }>("/evidence/:fileHash", async (req, reply) => {
+    try {
+      const dealId = req.query.dealId ?? "";
+      if (!dealId) return reply.code(400).send({ error: "Missing ?dealId=" });
+      const { wallet } = await authPartyOrReviewer(req, dealId, deps);
+      const registry = getSharedRegistry();
+      // Object access REQUIRES a committed manifest entry.
+      const entry = registry.getByFileHash(dealId, req.params.fileHash) ?? undefined;
+      if (!entry) return reply.code(404).send({ error: "Unknown evidence object" });
+      if (registry.isBlobPurged(dealId, entry.fileHash)) {
+        return reply.code(404).send({ error: "Evidence blob was purged under retention policy" });
+      }
+      const stream = req.query.exportOriginal;
+      const wantsOriginal = stream === "1" || stream?.toLowerCase() === "true";
+      if (wantsOriginal) {
+        if (!canExportOriginal(wallet)) {
+          return reply.code(403).send({ error: "Wallet lacks the exceptional original-export permission" });
+        }
+        const reason = (req.query.reason ?? "").trim();
+        if (reason === "") {
+          return reply.code(400).send({ error: "?reason= is required for an audited original export" });
+        }
+        registry.recordAudit({
+          actor: wallet,
+          action: "evidence.export-original",
+          dealId,
+          target: entry.fileHash,
+          reason,
+          detail: `scan=${scanStateOf(entry)}`,
+        });
+      } else {
+        const state = scanStateOf(entry);
+        if (isBlockedScanState(state)) {
           return reply
             .code(409)
-            .send({ error: "Evidence quarantined pending malware review", status: "quarantined" });
+            .send({ error: "Evidence unavailable pending malware review", status: state });
         }
-        const bytes = await getSharedBlobStore().get(dealId, req.params.fileHash);
-        if (!bytes) return reply.code(404).send({ error: "Unknown file" });
-        reply.header("content-type", entry?.mimetype ?? "application/octet-stream");
-        reply.header("content-disposition", `attachment; filename="${entry?.filename ?? "evidence.bin"}"`);
-        return reply.send(bytes);
-      } catch (error) {
-        return replyError(reply, error);
       }
-    },
-  );
+      const bytes = await getSharedBlobStore().get(dealId, entry.fileHash);
+      if (!bytes) return reply.code(404).send({ error: "Unknown file" });
+      reply.header("content-type", entry.mimetype ?? "application/octet-stream");
+      reply.header(
+        "content-disposition",
+        `attachment; filename="${entry.filename ?? "evidence.bin"}"`,
+      );
+      if (wantsOriginal) reply.header("x-evidence-original-export", "audited");
+      return reply.send(bytes);
+    } catch (error) {
+      return replyError(reply, error);
+    }
+  });
 
   // GET /evidence/:fileHash/receipt?dealId= — receipt + signer for offline verify.
   app.get<{ Params: { fileHash: string }; Querystring: { dealId?: string } }>(
@@ -214,14 +295,12 @@ export function registerEvidenceRoutes(app: FastifyInstance, deps: EvidenceRoute
         if (!dealId) return reply.code(400).send({ error: "Missing ?dealId=" });
         await authPartyOrReviewer(req, dealId, deps);
         const registry = getSharedRegistry();
-        const entry = registry
-          .getManifest(dealId)
-          .find((candidate) => candidate.fileHash.toLowerCase() === req.params.fileHash.toLowerCase());
+        const entry = registry.getByFileHash(dealId, req.params.fileHash);
         if (!entry) return reply.code(404).send({ error: "Unknown file" });
         if (entry.receipt) return { ...entry.receipt };
-        const receipt = await signReceipt({ dealId, seq: entry.seq, fileHash: entry.fileHash });
-        registry.attachReceipt(dealId, entry.seq, receipt);
-        return { ...receipt };
+        const signed = await signReceipt({ dealId, seq: entry.seq, fileHash: entry.fileHash });
+        await registry.attachReceiptAtomic(dealId, entry.seq, receiptRef(signed));
+        return { ...receiptRef(signed) };
       } catch (error) {
         return replyError(reply, error);
       }
@@ -261,18 +340,22 @@ export function registerEvidenceRoutes(app: FastifyInstance, deps: EvidenceRoute
         if (typeof fileHash !== "string" || fileHash === "") {
           return reply.code(400).send({ error: "Missing fileHash" });
         }
-        const entry = getSharedRegistry()
-          .getManifest(dealId)
-          .find((candidate) => candidate.fileHash.toLowerCase() === fileHash.toLowerCase());
-        if (isQuarantined(entry)) {
+        const registry = getSharedRegistry();
+        const entry = registry.getByFileHash(dealId, fileHash) ?? undefined;
+        if (!entry) return reply.code(404).send({ ok: false, error: "Unknown evidence object" });
+        if (registry.isBlobPurged(dealId, entry.fileHash)) {
+          return reply.code(404).send({ ok: false, error: "Evidence blob was purged under retention policy" });
+        }
+        const state = scanStateOf(entry);
+        if (isBlockedScanState(state)) {
           return reply
             .code(409)
-            .send({ ok: false, status: "quarantined", error: "Evidence quarantined pending malware review" });
+            .send({ ok: false, status: state, error: "Evidence unavailable pending malware review" });
         }
-        const bytes = await getSharedBlobStore().get(dealId, fileHash);
+        const bytes = await getSharedBlobStore().get(dealId, entry.fileHash);
         if (!bytes) return reply.code(404).send({ ok: false, error: "Unknown file" });
         const recomputed = `0x${createHash("sha256").update(bytes).digest("hex")}`;
-        return { ok: recomputed.toLowerCase() === fileHash.toLowerCase(), fileHash, recomputed };
+        return { ok: recomputed.toLowerCase() === entry.fileHash.toLowerCase(), fileHash: entry.fileHash, recomputed };
       } catch (error) {
         return replyError(reply, error);
       }

@@ -19,7 +19,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashAll } from "./policy-hash.mjs";
-import { POLICY_ID_PREIMAGES } from "./verify-deployment.mjs";
+import { EXPECTED_HUB_TIERS, POLICY_ID_PREIMAGES } from "./verify-deployment.mjs";
 
 export const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 export const CONTRACTS_DIR = path.join(REPO_ROOT, "packages", "contracts");
@@ -92,14 +92,15 @@ export function parseDeploymentFromArtifact(artifact) {
     const name = tx.contractName;
     if (name && tx.contractAddress) contracts[name] = tx.contractAddress;
   }
-  if (!contracts.MidmanHub || !contracts.MidmanPolicies || !contracts.MockUSDC || !contracts.MockFeed) {
-    throw new Error("DeployDev artifact missing expected contracts");
+  if (!contracts.MidmanHub || !contracts.MidmanPolicies || !contracts.MockUSDC || !contracts.MockFeed || !contracts.HubDispute) {
+    throw new Error("DeployDev artifact missing expected contracts (incl. HubDispute library)");
   }
   return {
     hub: contracts.MidmanHub,
     policies: contracts.MidmanPolicies,
     usdc: contracts.MockUSDC,
     feed: contracts.MockFeed,
+    disputeLibrary: contracts.HubDispute,
   };
 }
 
@@ -119,6 +120,7 @@ export function buildAnvilManifest(deployment, contentHashes) {
       sequencerFeed: deployment.feed,
       policies: deployment.policies,
       hub: deployment.hub,
+      disputeLibrary: deployment.disputeLibrary,
     },
     roles: {
       governanceTimelock: ANVIL_ACCOUNT0,
@@ -132,6 +134,21 @@ export function buildAnvilManifest(deployment, contentHashes) {
     },
     domain: { name: "MidmanEscrow", version: "1", chainId: ANVIL_CHAIN_ID, verifyingContract: deployment.hub },
     policyHashes: contentHashes,
+    policyValues: {
+      "category-v1": { minInspectionSeconds: "3600" },
+      "readiness-v1": { required: false },
+      "bond-v1": { claimantBondUnits: "5000000", respondentBondUnits: "5000000" },
+      "arbitration-v1": { tiersAllowed: "7" },
+      "outage-v1": { gracePeriodSeconds: "1800", maxIntervals: "8" },
+    },
+    governance: {
+      rotationDelaySeconds: "259200",
+      unpauseDelaySeconds: "86400",
+      vetoQuorum: "2",
+      minPanelSizes: { primary: "5", fallback: "5", veto: "3" },
+    },
+    hubTiers: EXPECTED_HUB_TIERS.map((tier) => ({ ...tier })),
+    expectedPrincipals: [],
     bytecodeHashes: {},
   };
 }

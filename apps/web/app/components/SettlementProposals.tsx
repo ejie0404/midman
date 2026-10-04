@@ -41,6 +41,7 @@ export default function SettlementProposals({
   quotedFeeUnits,
   buyerFeeBps,
   phase,
+  settlementNonce: settlementNonceProp,
 }: {
   dealId: string;
   agreementDigest: string;
@@ -50,11 +51,14 @@ export default function SettlementProposals({
   quotedFeeUnits: string;
   buyerFeeBps: 0 | 5000 | 10000;
   phase: string;
+  /** Live on-chain settlement nonce from the authoritative deal status. */
+  settlementNonce?: string | undefined;
 }) {
   const [auth, setAuth] = useState<RequestSigner | null>(null);
   const [claimantBond, setClaimantBond] = useState("5000000");
   const [respondentBond, setRespondentBond] = useState("5000000");
   const [awardUsdc, setAwardUsdc] = useState("");
+  const [nonce, setNonce] = useState(settlementNonceProp ?? "");
   const [proposals, setProposals] = useState<readonly SettlementProposal[]>([]);
   const [pending, setPending] = useState<{ proposalId: string; result: QueueRulingResult } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -100,6 +104,10 @@ export default function SettlementProposals({
     };
   }, [refresh]);
 
+  useEffect(() => {
+    if (settlementNonceProp) setNonce(settlementNonceProp);
+  }, [settlementNonceProp]);
+
   async function connect() {
     setFailure(null);
     try {
@@ -137,6 +145,9 @@ export default function SettlementProposals({
     setFailure(null);
     try {
       if (awardUsdc.trim() === "") throw new Error("Enter S in USDC.");
+      if (!/^0x[0-9a-fA-F]{64}$/.test(nonce)) {
+        throw new Error("A live on-chain settlement nonce is required — read it from the deal status; a random nonce is rejected.");
+      }
       const sellerAwardUnits = parseUSDC(awardUsdc);
       if (BigInt(sellerAwardUnits) > BigInt(principalUnits)) {
         throw new Error("S exceeds principal P — proposals are bounded to [0, P].");
@@ -156,6 +167,11 @@ export default function SettlementProposals({
           buyerCostUnits: costs.buyerCostUnits,
           sellerCostUnits: costs.sellerCostUnits,
           expectedPhase,
+          settlementNonce: nonce,
+          principalUnits,
+          claimantBondUnits: claimantBond,
+          respondentBondUnits: respondentBond,
+          agreementDigest,
         },
         auth,
       );
@@ -271,6 +287,15 @@ export default function SettlementProposals({
         Bond inputs (5 USDC minimums; auto-filled from escalation when available): claimant{" "}
         <input value={claimantBond} onChange={(e) => setClaimantBond(e.target.value)} style={{ width: 120 }} /> ·
         respondent <input value={respondentBond} onChange={(e) => setRespondentBond(e.target.value)} style={{ width: 120 }} />
+      </p>
+      <p style={{ fontSize: 13 }}>
+        Live settlement nonce (bytes32, required — from the authoritative chain deal status):{" "}
+        <input
+          value={nonce}
+          onChange={(e) => setNonce(e.target.value)}
+          placeholder="0x… (never random)"
+          style={{ width: "100%", padding: 6, boxSizing: "border-box" }}
+        />
       </p>
       {preview ? (
         <div style={ok}>

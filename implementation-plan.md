@@ -211,7 +211,22 @@ Do not invent calendar estimates without team size, staffing and review availabi
 
 ## Current status and next work
 
-Three linked specification drafts, a canonical manifest and [model/reference validation](specs/validation-report.json) already exist. The reported 567,700 model/boundary cases passed. Production implementation, deployed token integration, full cryptographic/contract verification, custody benchmarking and operational acceptance have not been completed.
+Three linked specification drafts, a canonical manifest and [model/reference validation](specs/validation-report.json) already exist. The reported 567,700 model/boundary cases passed.
+
+### Deliverable status (Phase 7 separation)
+
+| Layer | State | Basis |
+|---|---|---|
+| **implemented** | YES | Contracts (`MidmanHub`, `HubDispute`, `MidmanPolicies`, `Finance`), API/worker/web, release scripts, policy records and deploy scripts exist |
+| **verified** (tests pass) | YES (this checkout) | `node scripts/verify-release.mjs`: spec model 567,700 cases; node suites 603 pass / 1 skip; script suites 87 pass; `forge test` 243 pass / 4 fork-skip; Foundry e2e + adversarial suites; anvil deploy + live `verify-deployment` |
+| **externally reviewed** | **NOT DONE** | No independent third-party report; Phase 12 §1–§2 remain open |
+| **deployed** | **NOT DONE** | No Base mainnet addresses, roles, domain or bytecode hashes instantiated |
+
+Production implementation is substantially present and self-verified on this
+checkout, but external review and mainnet deployment have not been completed.
+`verify-release` proves only the **verified** row; it never implies review or
+deployment. Counts above are re-checked by that command, which fails if a
+required suite or tool is unavailable.
 
 The next work is Phase 1 policy closure, followed by Phase 2 technical proofs. The previous nine blockers are allocated as follows:
 

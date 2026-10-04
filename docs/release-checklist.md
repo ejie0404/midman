@@ -4,18 +4,36 @@ Status: **not yet releasable**. This checklist is the Phase 12 gate. It is
 honest about what is proven on this checkout and what is still pending. No
 independent audit has been performed and no mainnet deployment exists.
 
+## Status legend (Phase 7)
+
+Every deliverable is labelled with one of four states. They are cumulative and
+must not be conflated:
+
+| State | Meaning |
+|---|---|
+| **implemented** | Code/docs exist on this checkout; may still be unrun or partial. |
+| **verified** | The automated suites on this checkout pass (commands below). Self-verification only. |
+| **externally reviewed** | An independent third party has reviewed the frozen candidate and produced a report. **NOT DONE.** |
+| **deployed** | Code/configuration is live on Base mainnet and matches the reviewed release. **NOT DONE.** |
+
+Current top-level status: **implemented: yes · verified: yes (this checkout) ·
+externally reviewed: NO · deployed: NO.**
+
 Evidence snapshot (reproduced on this checkout):
 
 | Check | Command | Result |
 |---|---|---|
 | Spec/model | `node specs/validate-spec.mjs` | PASS, 567,700 cases, `releaseBlockers: 9` |
-| Node suites | `pnpm -r test` | 486 pass / 0 fail |
-| Script suites | `pnpm test:scripts` | 44 pass / 0 fail |
-| Contract suites | `forge test` | 186 pass / 0 fail / 4 fork-skip |
-| Dependency audit | `pnpm audit` | 0 critical, 0 high, 1 moderate (accepted; `docs/dependency-pins.md`) |
+| Node suites | `pnpm -r test` | 603 pass / 0 fail / 1 skipped |
+| Script suites | `pnpm test:scripts` | 87 pass / 0 fail (6 files, incl. verify-release) |
+| Contract suites | `forge test` | 243 pass / 0 fail / 4 fork-skip (247 total) |
+| Release gate | `node scripts/verify-release.mjs` | PASS (mandatory); `--optional` for local |
+| Dependency audit | `pnpm audit` | 0 critical, 0 high, 1 moderate (accepted: `uuid` buf path; `docs/dependency-pins.md`) |
 | Fork (pinned block 52126164) | `BASE_RPC_URL=... forge test` | 4 pass |
 
-The counts above reflect the post-remediation tree (audit response Phases 1–7).
+The counts above reflect the post-remediation tree (audit response Phases 1–7)
+and are re-checked by `scripts/verify-release.mjs`, which fails if any required
+suite or tool is unavailable.
 
 ## 0. Independent-audit remediation status (audit response Phases 1–7)
 
@@ -35,9 +53,9 @@ which remains **OPEN** (§2).
 | 8 | Tx success reported incorrectly | `sendAndConfirm` checks receipt status; `confirmEvent` requires the expected event; DisputeButton gates on the exact tx | FIXED |
 | 9 | Evidence integrity/access defects | Atomic convergent DEK creation, durable production KEK + rotation/keyring, content-bound upload signature, least-privilege reviewer access, quarantine gating. 18 cases | FIXED |
 | 10 | Relay/indexer reliability | Calldata↔action validation, atomic lease + crash recovery, bounded retries, nonce serialization, receipt tracking; indexer same-height reorg + re-inclusion + chain-derived deal discovery | FIXED |
-| 11 | Policy/deployment safeguards | Panel uniqueness/independence + tier sizing; separate `DeployDev`/`DeployProd` (no mock fallback, explicit roles/panels/policies); RPC `verify-deployment.mjs` | FIXED |
+| 11 | Policy/deployment safeguards | Panel uniqueness/independence + tier sizing; separate `DeployDev`/`DeployProd` (no mock fallback, explicit roles/panels/policies); RPC `verify-deployment.mjs` checks policy VALUES + governance/panel completeness + pinned `HubDispute` linkage; ABI-drift CI gate; mandatory `verify-release.mjs` | FIXED (verified; not externally reviewed) |
 | 12 | Monitoring/replay protection | Truthful solvency (`ok:null` = unknown), retryable alert delivery, non-placeholder metrics; uniform offer-epoch invalidation (`transition`) | FIXED |
-| 13 | Dependency advisories | Next 15 / React 19, Fastify 5, aws-sdk, ws/postcss overrides → 0 critical/high | FIXED |
+| 13 | Dependency advisories | Next 15 / React 19, Fastify 5, aws-sdk, ws/postcss overrides → 0 critical/high; `uuid@9.0.1` moderate assessed (v3/v5/v6 `buf` path unused by `bullmq`, accepted in `docs/dependency-pins.md`) | FIXED |
 
 ## 1. RB-01..RB-09 release-blocker gate
 
@@ -72,7 +90,7 @@ policy records are not yet instantiated. This is the primary release blocker.
 | Drills passed | Restore + outage + capacity drills | Code-level drills pass (`apps/worker/src/drills/`, `apps/worker/test/capacity.test.mjs`); live restore/on-call rehearsal pending | **PARTIAL** |
 | Bounty live | Program funded, channels monitored | Draft only (`docs/bug-bounty.md`); funding line unset | **OPEN** |
 | Disclosures published | Fee/deadline/dispute/escape disclosures before funding | Not yet published | **OPEN** |
-| Policy register approved & frozen | P-01..P-15 approved; content hashes recorded | Approved 2026-10-03 (`specs/policy-register.md`); 8 policy records registered by `Deploy.s.sol` | RESOLVED (content hashes to be finalized in manifest) |
+| Policy register approved & frozen | P-01..P-15 approved; content hashes recorded | Approved 2026-10-03 (`specs/policy-register.md`); 8 policy records registered by `DeployProd.s.sol` | RESOLVED (content hashes to be finalized in manifest) |
 | Public/spec model parity | `node specs/validate-spec.mjs` PASS | PASS, 567,700 cases | RESOLVED |
 
 ## 3. Reproduce the evidence
@@ -82,8 +100,18 @@ node specs/validate-spec.mjs
 pnpm -r test
 forge build --sizes
 forge test
+node scripts/export-abi.mjs && git diff --exit-code -- packages/chain/src/abi/generated
 $env:BASE_RPC_URL="https://mainnet.base.org"; forge test     # fork suite, pinned block 52126164
+node scripts/verify-release.mjs            # mandatory gate (CI)
+node scripts/verify-release.mjs --optional # local: skip unavailable tools
 ```
+
+`node scripts/verify-release.mjs` is the single self-verification command: it
+runs the spec model, node suites, script suites, `forge build`/`test`, the
+Foundry e2e + adversarial suites and the anvil e2e, asserts the adversarial
+coverage test names actually ran, and fails if any required tool or step is
+unavailable. It proves **verified**, not **externally reviewed** or
+**deployed**.
 
 ## 4. Go decision
 
@@ -94,3 +122,7 @@ emergency controls are assigned to real timelock/multisig/panel addresses;
 monitoring/alerting is live; drills are re-run against the deployed environment;
 the bounty program is funded and live; and user-facing disclosures are published.
 See `docs/phase12-release.md` for the freeze procedure and completion gate.
+
+A green `node scripts/verify-release.mjs` upgrades the tree to **verified** only.
+It does not satisfy **externally reviewed** (no independent report exists) or
+**deployed** (no Base mainnet addresses/config), both of which remain outstanding.

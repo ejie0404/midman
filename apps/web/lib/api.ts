@@ -1,5 +1,7 @@
 // Typed fetch wrappers for the Midman V1 API.
-// Base URL: NEXT_PUBLIC_API_URL ?? http://localhost:3001.
+// Base URL: NEXT_PUBLIC_API_URL ?? "/api" (same-origin Next.js rewrite proxy).
+// The "/api" default keeps the wallet session cookie first-party; see
+// next.config.mjs for the rewrite and the documented CORS fallback.
 // Delegates to @midman/api-client (single validated definitions + typed
 // client). Every helper throws ApiError (with HTTP status) on failure so pages
 // can render error surfaces instead of crashing. ApiValidationError is thrown
@@ -10,8 +12,13 @@ import { ApiError, MidmanClient } from "@midman/api-client";
 export { ApiError } from "@midman/api-client";
 export type { ApiValidationError } from "@midman/api-client";
 
-export const API_BASE =
-  (typeof process !== "undefined" && process.env["NEXT_PUBLIC_API_URL"]) || "http://localhost:3001";
+function resolveApiBase(): string {
+  const configured =
+    typeof process !== "undefined" ? process.env["NEXT_PUBLIC_API_URL"] : undefined;
+  return configured && configured.trim() !== "" ? configured.trim().replace(/\/+$/, "") : "/api";
+}
+
+export const API_BASE = resolveApiBase();
 
 const client = new MidmanClient(API_BASE);
 
@@ -119,6 +126,8 @@ export interface DealStatus {
   readonly disputeOpenedAt?: string;
   readonly disputeUsed?: boolean;
   readonly events?: number;
+  /** Live on-chain settlement counter when the status endpoint exposes it. */
+  readonly settlementNonce?: string;
   readonly terms?: DraftTerms;
 }
 

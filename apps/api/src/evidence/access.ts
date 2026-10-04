@@ -24,10 +24,20 @@
 // the 4-line message `${METHOD}\n${path}\n${bodyHash}\n${expiry}`; that form
 // is accepted only while x-content-sha256 is absent. Requests are rejected
 // when expired or when expiry is more than 15 minutes in the future.
+//
+// Round-2 Phase 6: metadata-bound authorization. When the request carries
+// `x-request-nonce` + `x-request-action`, the caller may additionally (or
+// instead) sign the richer `buildMetadataSignedMessage` form, which binds the
+// deal, action, file hash, filename/mime/size, body hash, nonce, expiry, and
+// the app/domain context. A metadata-bound request's nonce is consumed
+// durably (`evidence.auth-nonces`) so the exact same signature cannot be
+// replayed after a restart. The older 4-/5-line forms remain accepted for
+// backward compatibility.
 import { createHash } from "node:crypto";
 import type { FastifyRequest } from "fastify";
 import { recoverMessageAddress, type Address, type Hash } from "viem";
 import { getCase, listOpen } from "../review/registry.js";
+import { getSharedRegistry } from "./registry.js";
 
 /** Max seconds an expiry may lie in the future (clock-skew bound). */
 export const SIGNED_REQUEST_SKEW_SECONDS = 15 * 60;
@@ -35,8 +45,91 @@ export const SIGNED_REQUEST_SKEW_SECONDS = 15 * 60;
 /** Header carrying the sha256 of an upload's file CONTENT (bound in the signature). */
 export const CONTENT_SHA256_HEADER = "x-content-sha256";
 
+/** Metadata-bound request headers (Round-2 Phase 6). */
+export const REQUEST_NONCE_HEADER = "x-request-nonce";
+export const REQUEST_ACTION_HEADER = "x-request-action";
+export const REQUEST_DEAL_HEADER = "x-request-deal";
+export const REQUEST_FILE_HEADER = "x-request-file";
+export const REQUEST_FILENAME_HEADER = "x-request-filename";
+export const REQUEST_MIME_HEADER = "x-request-mime";
+export const REQUEST_SIZE_HEADER = "x-request-size";
+
+/** App identifier bound into metadata-bound signatures. */
+export const EVIDENCE_AUTH_APP = "midman";
+
+/** Default domain bound into metadata-bound signatures. */
+export const EVIDENCE_AUTH_DOMAIN_DEFAULT = "midman.local";
+
+/** The domain bound into metadata-bound signatures (env-overridable). */
+export function evidenceAuthDomain(): string {
+  const configured = (process.env["EVIDENCE_AUTH_DOMAIN"] ?? "").trim();
+  return configured === "" ? EVIDENCE_AUTH_DOMAIN_DEFAULT : configured;
+}
+
+export interface RequestMetadata {
+  readonly app: string;
+  readonly domain: string;
+  readonly method: string;
+  readonly path: string;
+  readonly dealId: string;
+  readonly action: string;
+  readonly fileHash: string;
+  readonly filename: string;
+  readonly mime: string;
+  readonly size: string;
+  readonly bodySha256: string;
+  readonly nonce: string;
+  readonly expiry: string;
+}
+
+/**
+ * Canonical metadata-bound signed message. Exported so clients and tests build
+ * byte-identical messages. Format (UTF-8, LF separated):
+ *   `MidmanEvidenceAuth|v1`
+ *   `app: <app>`
+ *   `domain: <domain>`
+ *   `method: <METHOD>`
+ *   `path: <path>`
+ *   `deal: <dealId>`
+ *   `action: <action>`
+ *   `fileHash: <hex or empty>`
+ *   `filename: <name or empty>`
+ *   `mime: <mime or empty>`
+ *   `size: <bytes or empty>`
+ *   `bodySha256: <hex>`
+ *   `nonce: <hex>`
+ *   `expiry: <unix seconds>`
+ */
+export function buildMetadataSignedMessage(meta: RequestMetadata): string {
+  return [
+    "MidmanEvidenceAuth|v1",
+    `app: ${meta.app}`,
+    `domain: ${meta.domain}`,
+    `method: ${meta.method.toUpperCase()}`,
+    `path: ${meta.path}`,
+    `deal: ${meta.dealId}`,
+    `action: ${meta.action}`,
+    `fileHash: ${meta.fileHash}`,
+    `filename: ${meta.filename}`,
+    `mime: ${meta.mime}`,
+    `size: ${meta.size}`,
+    `bodySha256: ${meta.bodySha256}`,
+    `nonce: ${meta.nonce}`,
+    `expiry: ${meta.expiry}`,
+  ].join("\n");
+}
+
 export function sha256Hex(data: Uint8Array | string): string {
   return createHash("sha256").update(data).digest("hex");
+}
+
+export function normalizeNonce(raw: string): string {
+  const trimmed = raw.trim().toLowerCase();
+  return trimmed.startsWith("0x") ? trimmed.slice(2) : trimmed;
+}
+
+function isValidNonce(nonce: string): boolean {
+  return /^[0-9a-f]{16,128}$/.test(nonce);
 }
 
 function httpError(statusCode: number, message: string): Error & { statusCode: number } {
@@ -98,6 +191,43 @@ function buildLegacySignedMessage(method: string, path: string, bodyHashHex: str
   return `${method.toUpperCase()}\n${path}\n${bodyHashHex}\n${expiry}`;
 }
 
+/**
+ * Build the metadata-bound message for a live request from its headers/params.
+ * Returns null when the request does not opt into metadata binding (no nonce
+ * and no action header).
+ */
+export function metadataFromRequest(
+  req: FastifyRequest,
+  values: { bodySha256: string; contentSha256: string; expiry: string },
+): RequestMetadata | null {
+  const nonce = normalizeNonce(headerValue(req, REQUEST_NONCE_HEADER));
+  const action = headerValue(req, REQUEST_ACTION_HEADER).trim();
+  if (nonce === "" && action === "") return null;
+  const params = (req.params ?? {}) as { dealId?: string; fileHash?: string };
+  const query = (req.query ?? {}) as { dealId?: string };
+  const dealId = headerValue(req, REQUEST_DEAL_HEADER).trim() || params.dealId || query.dealId || "";
+  const fileHash =
+    headerValue(req, REQUEST_FILE_HEADER).trim() ||
+    values.contentSha256 ||
+    params.fileHash ||
+    "";
+  return {
+    app: EVIDENCE_AUTH_APP,
+    domain: evidenceAuthDomain(),
+    method: (req.method ?? "GET").toUpperCase(),
+    path: req.url ?? "/",
+    dealId,
+    action,
+    fileHash,
+    filename: headerValue(req, REQUEST_FILENAME_HEADER),
+    mime: headerValue(req, REQUEST_MIME_HEADER),
+    size: headerValue(req, REQUEST_SIZE_HEADER),
+    bodySha256: values.bodySha256,
+    nonce,
+    expiry: values.expiry,
+  };
+}
+
 /** Verify signed-request headers; resolves the authorized wallet or throws 401. */
 export async function verifySignedRequest(req: FastifyRequest): Promise<Address> {
   const wallet = headerValue(req, "x-wallet-address");
@@ -122,23 +252,56 @@ export async function verifySignedRequest(req: FastifyRequest): Promise<Address>
   const path = req.url ?? "/";
   const contentSha = declaredContentSha256(req);
   const bodyHash = signedBodyHashHex(req);
-  const messages = [buildSignedMessage(method, path, bodyHash, contentSha, expiryRaw)];
+
+  const candidates: Array<{ kind: "meta" | "content" | "legacy"; message: string }> = [];
+  const meta = metadataFromRequest(req, { bodySha256: bodyHash, contentSha256: contentSha, expiry: expiryRaw });
+  if (meta && meta.nonce !== "" && meta.action !== "") {
+    if (!isValidNonce(meta.nonce)) {
+      throw httpError(401, "Missing or invalid x-request-nonce");
+    }
+    candidates.push({ kind: "meta", message: buildMetadataSignedMessage(meta) });
+  }
+  candidates.push({ kind: "content", message: buildSignedMessage(method, path, bodyHash, contentSha, expiryRaw) });
   // Backward compatibility: no content header -> also accept the legacy
   // 4-line message so pre-binding clients are not locked out.
-  if (contentSha === "") messages.push(buildLegacySignedMessage(method, path, bodyHash, expiryRaw));
-  let recovered: Address | null = null;
-  for (const message of messages) {
+  if (contentSha === "") {
+    candidates.push({ kind: "legacy", message: buildLegacySignedMessage(method, path, bodyHash, expiryRaw) });
+  }
+
+  let matched: { kind: "meta" | "content" | "legacy"; message: string } | null = null;
+  for (const candidate of candidates) {
     try {
-      const candidate = await recoverMessageAddress({ message, signature: signature as Hash });
-      if (candidate.toLowerCase() === wallet.toLowerCase()) {
-        recovered = candidate;
+      const recovered = await recoverMessageAddress({ message: candidate.message, signature: signature as Hash });
+      if (recovered.toLowerCase() === wallet.toLowerCase()) {
+        matched = candidate;
         break;
       }
     } catch {
       // try the next candidate format
     }
   }
-  if (!recovered) throw httpError(401, "Invalid wallet signature");
+  if (!matched) throw httpError(401, "Invalid wallet signature");
+
+  if (matched.kind === "meta" && meta) {
+    // Bind the signed metadata to the actual request target.
+    const params = (req.params ?? {}) as { dealId?: string; fileHash?: string };
+    const query = (req.query ?? {}) as { dealId?: string };
+    const actualDealId = params.dealId ?? query.dealId ?? "";
+    if (actualDealId !== "" && meta.dealId.toLowerCase() !== actualDealId.toLowerCase()) {
+      throw httpError(401, "Signed request deal does not match the request target");
+    }
+    const actualFile = params.fileHash ?? "";
+    if (actualFile !== "" && meta.fileHash !== "" && meta.fileHash.toLowerCase() !== actualFile.toLowerCase()) {
+      throw httpError(401, "Signed request file does not match the request target");
+    }
+    const consumed = await getSharedRegistry().consumeAuthNonce({
+      nonce: meta.nonce,
+      dealId: meta.dealId || actualDealId,
+      expiresAt: expiry,
+      now: nowSeconds,
+    });
+    if (!consumed) throw httpError(401, "Signed request nonce already used");
+  }
   return wallet as Address;
 }
 
@@ -230,6 +393,25 @@ export function supervisorModeEnabled(): boolean {
 /** A supervisor is an allowlisted wallet while EVIDENCE_SUPERVISOR=1. */
 export function isSupervisor(wallet: string): boolean {
   return supervisorModeEnabled() && isReviewer(wallet);
+}
+
+/**
+ * Explicit wallet allowlist permitted to export an original (even quarantined)
+ * blob. Empty/unset means nobody may use the exceptional path.
+ */
+export function originalExportAllowlist(): Set<string> {
+  const raw = process.env["EVIDENCE_ORIGINAL_EXPORT_WALLETS"] ?? "";
+  return new Set(
+    raw
+      .split(",")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+/** Whether `wallet` may perform an audited exceptional original export. */
+export function canExportOriginal(wallet: string): boolean {
+  return originalExportAllowlist().has(wallet.toLowerCase()) || isSupervisor(wallet);
 }
 
 /**

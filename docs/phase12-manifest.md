@@ -72,6 +72,11 @@ any hard check fails. Checks performed:
   `contracts.sequencerFeed == 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433`;
 - all 8 policy records load (`version: 1`, exact-string quantities) and their
   recomputed hashes equal `policyHashes`;
+- the manifest `policyValues` block matches the canonical values encoded in the
+  policy records (category min inspection, readiness required flag, bond
+  amounts, arbitration tier bitmask, outage grace/intervals);
+- the manifest `hubTiers` table and `governance` delays match the frozen
+  contract constants (tier quorums/delays, `ROTATION_DELAY`, `UNPAUSE_DELAY`);
 - `domain.name == "MidmanEscrow"`, `domain.version == "1"`;
 - `bytecodeHashes` equal recomputed keccak256 of `deployedBytecode.object`
   when the Foundry artifacts exist (otherwise reported `artifacts-missing`);

@@ -61,6 +61,28 @@ library DeployPolicyIds {
     bytes32 internal constant CATASTROPHIC = keccak256("MIDMAN.CATASTROPHIC.v1");
 }
 
+/// @notice Canonical on-chain policy VALUES, identical to the reviewed
+/// off-chain records under deploy/policies/*.json. They are pinned here (rather
+/// than repeated as magic numbers in two scripts) so DeployProd, DeployDev and
+/// the deployment verifier agree on one source of truth. `scripts/verify-deployment.mjs`
+/// reads these exact values back from the registry and fails on any drift
+/// against the manifest `policyValues` block.
+library DeployPolicyValues {
+    // category-v1: canonical INSTANT_CODE minimum inspection window.
+    uint32 internal constant CATEGORY_MIN_INSPECTION = 3_600;
+    // readiness-v1: canonical no-readiness marker (required == false).
+    bool internal constant READINESS_REQUIRED = false;
+    // bond-v1: 5 USDC (6 decimals) per contesting party.
+    uint256 internal constant BOND_CLAIMANT = 5_000_000;
+    uint256 internal constant BOND_RESPONDENT = 5_000_000;
+    // arbitration-v1: all three principal tiers allowed (bits 0,1,2).
+    uint8 internal constant ARBITRATION_TIERS_ALLOWED = 0x07;
+    // outage-v1: 30-minute recovery grace, at most 8 retained intervals.
+    uint32 internal constant OUTAGE_GRACE_SECONDS = 1_800;
+    uint8 internal constant OUTAGE_MAX_INTERVALS = 8;
+}
+
+
 /// @notice Production deployment logic, factored into an internal function that
 /// takes explicit arguments so test/DeployScripts.t.sol can drive it without
 /// vm.env or a broadcast. `registrar` is the address that will call the
@@ -167,12 +189,25 @@ abstract contract DeployProdBase {
         MidmanPolicies policies =
             new MidmanPolicies(c.governance, c.pauser, c.admissionSigner, c.treasury, c.feed, c.primary, c.fallbackPanel, c.veto);
         policies.registerFeePolicy(DeployPolicyIds.FEE, c.feeHash);
-        policies.registerCategoryPolicy(DeployPolicyIds.CATEGORY, c.categoryHash, 3_600);
-        policies.registerReadinessPolicy(DeployPolicyIds.READINESS, c.readinessHash, false);
+        policies.registerCategoryPolicy(
+            DeployPolicyIds.CATEGORY, c.categoryHash, DeployPolicyValues.CATEGORY_MIN_INSPECTION
+        );
+        policies.registerReadinessPolicy(
+            DeployPolicyIds.READINESS, c.readinessHash, DeployPolicyValues.READINESS_REQUIRED
+        );
         policies.registerEvidencePolicy(DeployPolicyIds.EVIDENCE, c.evidenceHash);
-        policies.registerBondPolicy(DeployPolicyIds.BOND, c.bondHash, 5_000_000, 5_000_000);
-        policies.registerArbitrationPolicy(DeployPolicyIds.ARBITRATION, c.arbitrationHash, 0x07);
-        policies.registerOutagePolicy(DeployPolicyIds.OUTAGE, c.outageHash, 1_800, 8);
+        policies.registerBondPolicy(
+            DeployPolicyIds.BOND, c.bondHash, DeployPolicyValues.BOND_CLAIMANT, DeployPolicyValues.BOND_RESPONDENT
+        );
+        policies.registerArbitrationPolicy(
+            DeployPolicyIds.ARBITRATION, c.arbitrationHash, DeployPolicyValues.ARBITRATION_TIERS_ALLOWED
+        );
+        policies.registerOutagePolicy(
+            DeployPolicyIds.OUTAGE,
+            c.outageHash,
+            DeployPolicyValues.OUTAGE_GRACE_SECONDS,
+            DeployPolicyValues.OUTAGE_MAX_INTERVALS
+        );
         policies.registerCatastrophicPolicy(DeployPolicyIds.CATASTROPHIC, c.catastrophicHash);
         MidmanHub hub = new MidmanHub(c.usdc, address(policies));
         out = ProdDeployment({policies: address(policies), hub: address(hub)});
@@ -303,6 +338,8 @@ contract DeployProd is Script, DeployProdBase {
         _printPanel("primaryPanel", c.primary);
         _printPanel("fallbackPanel", c.fallbackPanel);
         _printPanel("vetoPanel", c.veto);
+        _printPolicyValues();
+        _printGovernanceValues(out.policies);
         console.log("policyIds:");
         console.logBytes32(DeployPolicyIds.FEE);
         console.logBytes32(DeployPolicyIds.CATEGORY);
@@ -321,5 +358,25 @@ contract DeployProd is Script, DeployProdBase {
             console.log(string.concat("    \"", vm.toString(panel[i]), "\"", i + 1 < panel.length ? "," : ""));
         }
         console.log("  ],");
+    }
+
+    /// @notice Emit the registered policy VALUES so the operator can copy them
+    /// verbatim into the manifest `policyValues` block; scripts/verify-deployment.mjs
+    /// then reads them back from the registry and fails on any drift.
+    function _printPolicyValues() internal pure {
+        console.log("policyValues:");
+        console.log(string.concat('  "category-v1": { "minInspectionSeconds": "', vm.toString(uint256(DeployPolicyValues.CATEGORY_MIN_INSPECTION)), '" },'));
+        console.log(string.concat('  "readiness-v1": { "required": ', DeployPolicyValues.READINESS_REQUIRED ? "true" : "false", ' },'));
+        console.log(string.concat('  "bond-v1": { "claimantBondUnits": "', vm.toString(DeployPolicyValues.BOND_CLAIMANT), '", "respondentBondUnits": "', vm.toString(DeployPolicyValues.BOND_RESPONDENT), '" },'));
+        console.log(string.concat('  "arbitration-v1": { "tiersAllowed": "', vm.toString(uint256(DeployPolicyValues.ARBITRATION_TIERS_ALLOWED)), '" },'));
+        console.log(string.concat('  "outage-v1": { "gracePeriodSeconds": "', vm.toString(uint256(DeployPolicyValues.OUTAGE_GRACE_SECONDS)), '", "maxIntervals": "', vm.toString(uint256(DeployPolicyValues.OUTAGE_MAX_INTERVALS)), '" },'));
+    }
+
+    function _printGovernanceValues(address policies) internal view {
+        console.log("governance:");
+        console.log(string.concat('  "rotationDelaySeconds": "', vm.toString(MidmanPolicies(policies).ROTATION_DELAY()), '",'));
+        console.log(string.concat('  "unpauseDelaySeconds": "', vm.toString(MidmanPolicies(policies).UNPAUSE_DELAY()), '",'));
+        console.log('  "vetoQuorum": "2",');
+        console.log('  "minPanelSizes": { "primary": "5", "fallback": "5", "veto": "3" },');
     }
 }

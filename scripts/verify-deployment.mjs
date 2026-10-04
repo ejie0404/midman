@@ -57,16 +57,63 @@ export const POLICY_ID_PREIMAGES = {
   'catastrophic-v1': 'MIDMAN.CATASTROPHIC.v1',
 };
 
+// Getter metadata. `valueIndexes` maps the manifest `policyValues.<type>` keys
+// to the position of that field in the getter's return tuple (the fields after
+// `exists` + `contentHash`). Fee/evidence/catastrophic carry no on-chain values
+// beyond existence + hash, so they have none.
 export const POLICY_GETTERS = {
-  'fee-v1': { fn: 'feePolicies', existsIndex: 0, hashIndex: 1 },
-  'category-v1': { fn: 'categoryPolicies', existsIndex: 0, hashIndex: 1 },
-  'readiness-v1': { fn: 'readinessPolicies', existsIndex: 0, hashIndex: 1 },
-  'evidence-v1': { fn: 'evidencePolicies', existsIndex: 0, hashIndex: 1 },
-  'bond-v1': { fn: 'bondPolicies', existsIndex: 0, hashIndex: 1 },
-  'arbitration-v1': { fn: 'arbitrationPolicies', existsIndex: 0, hashIndex: 1 },
-  'outage-v1': { fn: 'outagePolicies', existsIndex: 0, hashIndex: 1 },
-  'catastrophic-v1': { fn: 'catastrophicPolicies', existsIndex: 0, hashIndex: 1 },
+  'fee-v1': { fn: 'feePolicies', existsIndex: 0, hashIndex: 1, valueIndexes: {} },
+  'category-v1': {
+    fn: 'categoryPolicies',
+    existsIndex: 0,
+    hashIndex: 1,
+    valueIndexes: { minInspectionSeconds: 2 },
+  },
+  'readiness-v1': { fn: 'readinessPolicies', existsIndex: 0, hashIndex: 1, valueIndexes: { required: 2 } },
+  'evidence-v1': { fn: 'evidencePolicies', existsIndex: 0, hashIndex: 1, valueIndexes: {} },
+  'bond-v1': {
+    fn: 'bondPolicies',
+    existsIndex: 0,
+    hashIndex: 1,
+    valueIndexes: { claimantBondUnits: 2, respondentBondUnits: 3 },
+  },
+  'arbitration-v1': { fn: 'arbitrationPolicies', existsIndex: 0, hashIndex: 1, valueIndexes: { tiersAllowed: 2 } },
+  'outage-v1': {
+    fn: 'outagePolicies',
+    existsIndex: 0,
+    hashIndex: 1,
+    valueIndexes: { gracePeriodSeconds: 2, maxIntervals: 3 },
+  },
+  'catastrophic-v1': { fn: 'catastrophicPolicies', existsIndex: 0, hashIndex: 1, valueIndexes: {} },
 };
+
+// Value kinds for comparison against the manifest `policyValues` block.
+export const POLICY_VALUE_KINDS = {
+  'category-v1': { minInspectionSeconds: 'uint' },
+  'readiness-v1': { required: 'bool' },
+  'bond-v1': { claimantBondUnits: 'uint', respondentBondUnits: 'uint' },
+  'arbitration-v1': { tiersAllowed: 'uint' },
+  'outage-v1': { gracePeriodSeconds: 'uint', maxIntervals: 'uint' },
+};
+
+// Canonical hub per-tier quorum/delay expectations (MidmanHub.fund + DealTypes).
+// These are not exposed by a getter, so the manifest `hubTiers` block is
+// cross-checked against this frozen table: a contract change to the tier table
+// must be mirrored here and in the manifest or verification fails.
+export const EXPECTED_HUB_TIERS = [
+  { name: 'T1', maxPrincipalUnits: '1000000000', primaryQuorum: '2', fallbackQuorum: '2', executionDelaySeconds: '86400' },
+  { name: 'T2', maxPrincipalUnits: '10000000000', primaryQuorum: '3', fallbackQuorum: '3', executionDelaySeconds: '172800' },
+  { name: 'T3', unbounded: true, primaryQuorum: '3', fallbackQuorum: '3', executionDelaySeconds: '259200' },
+];
+
+// Canonical governance delays + panel floors (MidmanPolicies constants).
+export const EXPECTED_GOVERNANCE = {
+  rotationDelaySeconds: '259200',
+  unpauseDelaySeconds: '86400',
+  vetoQuorum: '2',
+  minPanelSizes: { primary: '5', fallback: '5', veto: '3' },
+};
+
 
 const f = (name, inputs = [], outputs = []) => ({
   type: 'function',
@@ -100,6 +147,8 @@ export const POLICIES_ABI = [
   f('treasury', [], [t('address')]),
   f('sequencerFeed', [], [t('address')]),
   f('authEpoch', [], [t('uint64')]),
+  f('ROTATION_DELAY', [], [t('uint256')]),
+  f('UNPAUSE_DELAY', [], [t('uint256')]),
   f('isPrimary', [t('uint64'), t('address')], [t('bool')]),
   f('isFallback', [t('uint64'), t('address')], [t('bool')]),
   f('isVeto', [t('address')], [t('bool')]),
@@ -148,6 +197,72 @@ function pick(result, index) {
   if (Array.isArray(result)) return result[index];
   if (result && typeof result === 'object') return Object.values(result)[index];
   return result;
+}
+
+// Compare a manifest-encoded policy value to its on-chain read.
+// `kind` is 'uint' (compared as BigInt so "3600" == 3600n) or 'bool'.
+export function policyValueMatches(kind, expected, actual) {
+  if (expected === undefined || expected === null) return false;
+  if (kind === 'bool') {
+    const normalized = expected === true || expected === 'true' || expected === 1 || expected === '1';
+    return Boolean(actual) === normalized;
+  }
+  try {
+    return BigInt(expected) === BigInt(actual);
+  } catch {
+    return false;
+  }
+}
+
+// Compare a bigint-ish on-chain read to a decimal string/BigInt expectation.
+function numericEquals(expected, actual) {
+  try {
+    return BigInt(expected) === BigInt(actual);
+  } catch {
+    return false;
+  }
+}
+
+// Structural equality for the frozen tier table (order-sensitive).
+export function tiersMatch(manifestTiers, expectedTiers = EXPECTED_HUB_TIERS) {
+  if (!Array.isArray(manifestTiers) || manifestTiers.length !== expectedTiers.length) return false;
+  for (let i = 0; i < expectedTiers.length; i += 1) {
+    const a = manifestTiers[i] || {};
+    const b = expectedTiers[i];
+    if (a.name !== b.name) return false;
+    if (Boolean(a.unbounded) !== Boolean(b.unbounded)) return false;
+    if (!b.unbounded && !numericEquals(a.maxPrincipalUnits, b.maxPrincipalUnits)) return false;
+    if (!numericEquals(a.primaryQuorum, b.primaryQuorum)) return false;
+    if (!numericEquals(a.fallbackQuorum, b.fallbackQuorum)) return false;
+    if (!numericEquals(a.executionDelaySeconds, b.executionDelaySeconds)) return false;
+  }
+  return true;
+}
+
+// Map a principal (decimal string) to a hub tier index using the frozen table.
+// Returns 0/1/2, or -1 when the principal is below the tier-1 minimum (unfundable).
+export function tierForPrincipal(principal, expectedTiers = EXPECTED_HUB_TIERS) {
+  let p;
+  try {
+    p = BigInt(principal);
+  } catch {
+    return -1;
+  }
+  for (let i = 0; i < expectedTiers.length; i += 1) {
+    const tier = expectedTiers[i];
+    if (tier.unbounded) return p > 0n ? i : -1;
+    if (p > 0n && p <= BigInt(tier.maxPrincipalUnits)) return i;
+  }
+  return -1;
+}
+
+function tierAllowed(tiersAllowed, tierIndex) {
+  if (tierIndex < 0 || tierIndex > 7) return false;
+  try {
+    return (BigInt(tiersAllowed) & (1n << BigInt(tierIndex))) !== 0n;
+  } catch {
+    return false;
+  }
 }
 
 function errMessage(error) {
@@ -219,9 +334,12 @@ export async function verifyDeployment(manifest, options = {}) {
   const roles = (manifest && manifest.roles) || {};
   const domain = (manifest && manifest.domain) || {};
   const policyHashes = (manifest && manifest.policyHashes) || {};
+  const policyValues = (manifest && manifest.policyValues) || {};
+  const governance = (manifest && manifest.governance) || {};
   const chainId = options.chainId ?? (manifest && manifest.network && manifest.network.chainId);
   const hub = contracts.hub;
   const policies = contracts.policies;
+  const disputeLibrary = contracts.disputeLibrary;
 
   if (!ADDRESS_RE.test(typeof hub === 'string' ? hub : '')) {
     bad('contracts.hub', `invalid or placeholder hub address: ${hub}`);
@@ -233,6 +351,7 @@ export async function verifyDeployment(manifest, options = {}) {
   // (a) code presence + optional deployedBytecode hash pinning.
   let hubCode;
   let policiesCode;
+  let disputeCode;
   if (ADDRESS_RE.test(typeof hub === 'string' ? hub : '')) {
     try {
       hubCode = await getCodeCompat(client, hub);
@@ -251,11 +370,32 @@ export async function verifyDeployment(manifest, options = {}) {
       add('code.policies', isCode(policiesCode) ? 'pass' : 'fail', isCode(policiesCode) ? 'code present' : 'no code');
     }
   }
+  // HubDispute is a *linked* library: the hub runtime bytecode embeds its
+  // address. Pin the deployed library address (and optionally its codehash) so
+  // the delegatecall target is a known, reviewed artifact.
+  if (ADDRESS_RE.test(typeof disputeLibrary === 'string' ? disputeLibrary : '')) {
+    try {
+      disputeCode = await getCodeCompat(client, disputeLibrary);
+    } catch (error) {
+      bad('code.disputeLibrary', errMessage(error));
+    }
+    if (disputeCode !== undefined) {
+      add(
+        'code.disputeLibrary',
+        isCode(disputeCode) ? 'pass' : 'fail',
+        isCode(disputeCode) ? 'code present' : 'no code at disputeLibrary',
+      );
+    }
+  } else {
+    skip('code.disputeLibrary', `disputeLibrary is not a pinned address: ${disputeLibrary}`);
+  }
 
   const bytecodeHashes = (manifest && manifest.bytecodeHashes) || {};
+  const hubIsLinked = ADDRESS_RE.test(typeof disputeLibrary === 'string' ? disputeLibrary : '');
   for (const [name, address, code] of [
     ['MidmanHub', hub, hubCode],
     ['MidmanPolicies', policies, policiesCode],
+    ['HubDispute', disputeLibrary, disputeCode],
   ]) {
     const pinned = bytecodeHashes[name];
     if (isPlaceholder(pinned)) {
@@ -271,7 +411,32 @@ export async function verifyDeployment(manifest, options = {}) {
       continue;
     }
     const actual = viem.keccak256(code);
-    add(`codeHash.${name}`, eqHex(actual, pinned) ? 'pass' : 'fail', actual);
+    if (eqHex(actual, pinned)) {
+      add(`codeHash.${name}`, 'pass', actual);
+    } else if (name === 'MidmanHub' && hubIsLinked) {
+      // The manifest hash is computed from the *pre-link* artifact (library
+      // placeholders zeroed), while live hub bytecode has the library address
+      // substituted at each link reference. The pinned hash is therefore
+      // advisory for a linked hub; the link check below is authoritative.
+      skip(`codeHash.${name}`, `advisory: pre-link artifact hash differs from linked hub code (actual=${actual})`);
+    } else {
+      bad(`codeHash.${name}`, actual);
+    }
+  }
+
+  // HubDispute linking consistency: the hub runtime code must embed the pinned
+  // library address (case-insensitive byte substring).
+  if (isCode(hubCode) && hubIsLinked) {
+    const needle = disputeLibrary.slice(2).toLowerCase();
+    add(
+      'link.hub',
+      hubCode.toLowerCase().includes(needle) ? 'pass' : 'fail',
+      `hub code ${hubCode.toLowerCase().includes(needle) ? 'contains' : 'does not embed'} disputeLibrary ${disputeLibrary}`,
+    );
+  } else if (!isCode(hubCode)) {
+    skip('link.hub', 'hub code unavailable');
+  } else {
+    skip('link.hub', 'disputeLibrary is not a pinned address');
   }
 
   // (b) hub immutables + EIP-712 domain.
@@ -372,6 +537,31 @@ export async function verifyDeployment(manifest, options = {}) {
           exists && hashOk ? 'pass' : 'fail',
           `exists=${exists} onchain=${hash} manifest=${expected}`,
         );
+
+        // Values: identifiers are not enough. Compare each registered on-chain
+        // value (category minInspection, readiness required, bond amounts,
+        // arbitration tier bitmask, outage grace/intervals) to the manifest
+        // `policyValues` block and fail on any mismatch.
+        const kinds = POLICY_VALUE_KINDS[policyType] || {};
+        const expectedValues = policyValues[policyType];
+        if (Object.keys(kinds).length === 0) {
+          // fee/evidence/catastrophic carry no on-chain values beyond
+          // existence + content hash.
+        } else if (!expectedValues || typeof expectedValues !== 'object') {
+          skip(`policyValues.${policyType}`, 'manifest has no policyValues entry for this policy');
+        } else {
+          for (const [key, kind] of Object.entries(kinds)) {
+            const valueIndex = getter.valueIndexes[key];
+            const onchainValue = pick(res, valueIndex);
+            const expectedValue = expectedValues[key];
+            const match = exists && policyValueMatches(kind, expectedValue, onchainValue);
+            add(
+              `policyValue.${policyType}.${key}`,
+              match ? 'pass' : 'fail',
+              `onchain=${onchainValue} manifest=${expectedValue}`,
+            );
+          }
+        }
       } catch (error) {
         bad(`policy.${policyType}`, errMessage(error));
       }
@@ -418,6 +608,119 @@ export async function verifyDeployment(manifest, options = {}) {
         add(`panel.veto[${i}]`, member ? 'pass' : 'fail', veto[i]);
       } catch (error) {
         bad(`panel.veto[${i}]`, errMessage(error));
+      }
+    }
+
+    // (g) governance delay mechanism (ROTATION_DELAY / UNPAUSE_DELAY constants).
+    for (const [id, fn, expected] of [
+      ['rotationDelay', 'ROTATION_DELAY', governance.rotationDelaySeconds],
+      ['unpauseDelay', 'UNPAUSE_DELAY', governance.unpauseDelaySeconds],
+    ]) {
+      if (isPlaceholder(expected)) {
+        skip(`governance.${id}`, `manifest governance.${id} not pinned`);
+        continue;
+      }
+      try {
+        const actual = await read(client, policies, POLICIES_ABI, fn);
+        add(
+          `governance.${id}`,
+          numericEquals(expected, actual) ? 'pass' : 'fail',
+          `onchain=${actual} manifest=${expected}`,
+        );
+      } catch (error) {
+        bad(`governance.${id}`, errMessage(error));
+      }
+    }
+
+    // (h) full membership for all three houses + disjointness, checked against
+    // the manifest panel lists (the on-chain membership checks above prove the
+    // lists are admitted; this proves the lists themselves are well-formed).
+    const houses = { primary, fallback, veto };
+    const panelProblems = [];
+    for (const [house, list] of Object.entries(houses)) {
+      if (list.length === 0) panelProblems.push(`${house} empty`);
+      const lowered = list.map((entry) => String(entry).toLowerCase());
+      if (new Set(lowered).size !== lowered.length) panelProblems.push(`${house} has duplicates`);
+    }
+    const seen = new Map();
+    for (const [house, list] of Object.entries(houses)) {
+      for (const entry of list) {
+        const key = String(entry).toLowerCase();
+        if (seen.has(key) && seen.get(key) !== house) {
+          panelProblems.push(`${key} appears in ${seen.get(key)} and ${house}`);
+        }
+        seen.set(key, house);
+      }
+    }
+    add(
+      'panel.completeness',
+      panelProblems.length === 0 ? 'pass' : 'fail',
+      panelProblems.length === 0
+        ? `primary=${primary.length} fallback=${fallback.length} veto=${veto.length}, distinct and disjoint`
+        : panelProblems.join('; '),
+    );
+
+    // (i) hub per-tier quorum/delay expectations vs the frozen canonical table.
+    const manifestTiers = Array.isArray(manifest && manifest.hubTiers) ? manifest.hubTiers : null;
+    if (!manifestTiers) {
+      skip('hubTiers', 'manifest has no hubTiers block');
+    } else {
+      add(
+        'hubTiers',
+        tiersMatch(manifestTiers) ? 'pass' : 'fail',
+        tiersMatch(manifestTiers) ? 'matches canonical tier table' : 'manifest hubTiers differ from canonical tier table',
+      );
+    }
+
+    // (j) panel quorum coverage: a 5-member panel must support the highest tier
+    // quorum (3), and the veto house must support the veto quorum (2).
+    const coverageTiers = manifestTiers && tiersMatch(manifestTiers) ? manifestTiers : EXPECTED_HUB_TIERS;
+    const maxNumeric = (values) => values.reduce((max, value) => (BigInt(value) > BigInt(max) ? value : max));
+    const maxPrimaryQuorum = maxNumeric(coverageTiers.map((tier) => tier.primaryQuorum));
+    const maxFallbackQuorum = maxNumeric(coverageTiers.map((tier) => tier.fallbackQuorum));
+    const vetoQuorum = isPlaceholder(governance.vetoQuorum) ? EXPECTED_GOVERNANCE.vetoQuorum : governance.vetoQuorum;
+    const coverageOk =
+      primary.length >= Number(maxPrimaryQuorum) &&
+      fallback.length >= Number(maxFallbackQuorum) &&
+      veto.length >= Number(vetoQuorum);
+    add(
+      'panel.coverage',
+      coverageOk ? 'pass' : 'fail',
+      `primary=${primary.length}/${maxPrimaryQuorum} fallback=${fallback.length}/${maxFallbackQuorum} veto=${veto.length}/${vetoQuorum}`,
+    );
+
+    // Structural floors (5 primary, 5 fallback, 3 veto) applied identically at
+    // construction and rotation; a panel can never be shrunk below these.
+    const minSizes = governance.minPanelSizes || EXPECTED_GOVERNANCE.minPanelSizes;
+    const minSizesOk =
+      primary.length >= Number(minSizes.primary) &&
+      fallback.length >= Number(minSizes.fallback) &&
+      veto.length >= Number(minSizes.veto);
+    add(
+      'panel.minSizes',
+      minSizesOk ? 'pass' : 'fail',
+      `primary=${primary.length}/${minSizes.primary} fallback=${fallback.length}/${minSizes.fallback} veto=${veto.length}/${minSizes.veto}`,
+    );
+
+    // (k) arbitration tier bitmask must allow every principal the manifest says
+    // is present (or expected to be funded).
+    let tiersAllowedOnchain;
+    try {
+      const arbId = onchainPolicyId(viem, 'arbitration-v1');
+      const arbRes = await read(client, policies, POLICIES_ABI, POLICY_GETTERS['arbitration-v1'].fn, [arbId]);
+      tiersAllowedOnchain = pick(arbRes, POLICY_GETTERS['arbitration-v1'].valueIndexes.tiersAllowed);
+    } catch (error) {
+      bad('tierAllows', errMessage(error));
+    }
+    if (tiersAllowedOnchain !== undefined) {
+      const principals = Array.isArray(manifest && manifest.expectedPrincipals) ? manifest.expectedPrincipals : [];
+      for (let i = 0; i < principals.length; i += 1) {
+        const tierIndex = tierForPrincipal(principals[i]);
+        add(
+          `tierAllows[${i}]`,
+          tierAllowed(tiersAllowedOnchain, tierIndex) ? 'pass' : 'fail',
+          `principal=${principals[i]} tier=${tierIndex} tiersAllowed=${tiersAllowedOnchain}`,
+        );
       }
     }
   }

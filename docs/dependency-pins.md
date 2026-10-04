@@ -63,6 +63,35 @@ deploy time and recorded in the deployment manifest/tooling.
 | redis | `7.4` | Local queue backend |
 | minio/minio | `RELEASE.2024-08-03T04-33-14Z` | Local S3-compatible evidence storage |
 
+## Advisory assessment
+
+`pnpm audit` reports **0 critical, 0 high, 0 low, 1 moderate**. The single
+moderate advisory is explicitly assessed and accepted here:
+
+| Advisory | Package | Dependency path | Disposition |
+|---|---|---|---|
+| GHSA-xvch-5gv4-984h / `1119441`: uuid missing buffer bounds check in v3/v5/v6 when `buf` is provided | `uuid@9.0.1` | `apps/worker > bullmq@5.4.2 > uuid@9.0.1` | **ACCEPTED (unused code path)** |
+
+**Rationale.** The vulnerable code is the optional `buf` output parameter of
+the v3/v5/v6 generators. `bullmq@5.4.2` imports only the v4 generator and calls
+it with no output buffer:
+
+```js
+// node_modules/.pnpm/bullmq@5.4.2/.../dist/cjs/classes/{flow-producer,queue,worker}.js
+const uuid_1 = require("uuid");
+const jobId = ... || (0, uuid_1.v4)();
+this.token = (0, uuid_1.v4)();
+this.id = (0, uuid_1.v4)();
+```
+
+No v3/v5/v6 call site exists in the dependency graph, so the missing bounds
+check is unreachable. `uuid@9.0.1` is therefore not exploitable in this
+codebase and no forced upgrade is applied (an override to `uuid@11` would be an
+unreviewed transitive lift against `bullmq`'s CommonJS import and is out of
+scope for this freeze). The advisory is re-checked on every dependency bump and
+must be re-triaged if any dependency starts using v3/v5/v6 with a `buf`
+argument.
+
 ## Update policy
 
 1. No floating ranges anywhere. The verifier rejects `^`, `~`, `*`, `x`,

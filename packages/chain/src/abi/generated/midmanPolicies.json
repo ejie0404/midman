@@ -3,7 +3,7 @@
   "source": "forge-artifact",
   "artifact": "packages/contracts/out/MidmanPolicies.sol/MidmanPolicies.json",
   "solc": "0.8.26+commit.8a97fa7a",
-  "generatedAt": "2026-10-04T16:03:45.597Z",
+  "abiHash": "e4cecacdd185583db60f21c8caa050aac18a4f8c4d6ab637a8af1010f1d1c437",
   "abi": [
     {
       "type": "constructor",

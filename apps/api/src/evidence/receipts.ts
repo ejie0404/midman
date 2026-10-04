@@ -3,14 +3,25 @@
 // the server key (RECEIPT_SIGNER_KEY; else an ephemeral dev key + warning).
 // Anyone can offline-verify via viem recoverMessageAddress.
 //
+// Round-2 Phase 6 additions:
+//   * The signer is REQUIRED in production (fail fast at startup); an
+//     ephemeral key is a dev-only convenience and is never used there.
+//   * Receipts carry a stable `keyId` + `version` so a receipt issued before a
+//     signer rotation still verifies afterwards. Historical signer keys are
+//     supplied via RECEIPT_SIGNER_KEY_HISTORY (comma-separated 0x keys) and
+//     resolved by keyId (`verifyReceiptWithHistory`).
+//
 // Malware: ClamAV TCP INSTREAM when CLAMAV_HOST is set (minimal protocol:
 // `zINSTREAM\0`, then 4-byte-BE-length-prefixed chunks, zero-length
 // terminator; parse FOUND/OK/ERROR). Otherwise the scan status is honestly
 // recorded as 'deferred' — never claimed as scanned-when-not.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { connect } from "node:net";
 import { recoverMessageAddress, type Address, type Hash } from "viem";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
+
+/** Bump when the receipt payload/format changes. */
+export const RECEIPT_VERSION = 2;
 
 export interface ReceiptInput {
   readonly dealId: string;
@@ -22,23 +33,55 @@ export interface SignedReceipt {
   readonly payload: string;
   readonly signature: Hash;
   readonly signer: Address;
+  /** Stable signer key identifier (resolvable after rotation/restart). */
+  readonly keyId: string;
+  /** Receipt format version. */
+  readonly version: number;
 }
 
 let cachedSigner: PrivateKeyAccount | null = null;
 let cachedSignerSource: string | null = null;
 let warnedEphemeralSigner = false;
 
+/** Deterministic key id for a signer address (no secret material in the id). */
+export function receiptKeyIdFor(address: string): string {
+  const digest = createHash("sha256").update(address.toLowerCase()).digest("hex");
+  return `receipt-${digest.slice(0, 16)}`;
+}
+
+function parseSignerKey(raw: string, field: string): Hash {
+  const key = raw.trim();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(key)) {
+    throw new Error(`${field} must be 0x + 64 hex chars`);
+  }
+  return key.toLowerCase() as Hash;
+}
+
+function loadHistoricalReceiptAccounts(): PrivateKeyAccount[] {
+  const raw = (process.env["RECEIPT_SIGNER_KEY_HISTORY"] ?? "").trim();
+  if (raw === "") return [];
+  const accounts: PrivateKeyAccount[] = [];
+  for (const entry of raw.split(",")) {
+    if (entry.trim() === "") continue;
+    accounts.push(privateKeyToAccount(parseSignerKey(entry, "RECEIPT_SIGNER_KEY_HISTORY")));
+  }
+  return accounts;
+}
+
 function loadSignerAccount(): PrivateKeyAccount {
   const key = (process.env["RECEIPT_SIGNER_KEY"] ?? "").trim();
   if (key !== "") {
-    if (!/^0x[0-9a-fA-F]{64}$/.test(key)) {
-      throw new Error("RECEIPT_SIGNER_KEY must be 0x + 64 hex chars");
-    }
-    if (!cachedSigner || cachedSignerSource !== key.toLowerCase()) {
-      cachedSigner = privateKeyToAccount(key as Hash);
-      cachedSignerSource = key.toLowerCase();
+    const parsed = parseSignerKey(key, "RECEIPT_SIGNER_KEY");
+    if (!cachedSigner || cachedSignerSource !== parsed) {
+      cachedSigner = privateKeyToAccount(parsed);
+      cachedSignerSource = parsed;
     }
     return cachedSigner;
+  }
+  if (process.env["NODE_ENV"] === "production") {
+    throw new Error(
+      "Receipt signing requires RECEIPT_SIGNER_KEY in production: set a durable 0x-prefixed 32-byte key (an ephemeral dev key would not verify after restart)",
+    );
   }
   if (!cachedSigner || cachedSignerSource !== "ephemeral") {
     cachedSigner = privateKeyToAccount(`0x${randomBytes(32).toString("hex")}` as Hash);
@@ -49,6 +92,14 @@ function loadSignerAccount(): PrivateKeyAccount {
     }
   }
   return cachedSigner;
+}
+
+/**
+ * Fail-fast startup check: in production a durable signer MUST be configured.
+ * In development this materializes the ephemeral signer (with a warning).
+ */
+export function assertReceiptSignerConfigured(): Address {
+  return loadSignerAccount().address;
 }
 
 /** Test-only reset for the signer cache. */
@@ -66,7 +117,13 @@ export async function signReceipt(input: ReceiptInput): Promise<SignedReceipt> {
   const account = loadSignerAccount();
   const payload = receiptPayload(input);
   const signature = (await account.signMessage({ message: payload })) as Hash;
-  return { payload, signature, signer: account.address };
+  return {
+    payload,
+    signature,
+    signer: account.address,
+    keyId: receiptKeyIdFor(account.address),
+    version: RECEIPT_VERSION,
+  };
 }
 
 export async function verifyReceipt(receipt: SignedReceipt, expectedSigner?: string): Promise<{
@@ -78,6 +135,48 @@ export async function verifyReceipt(receipt: SignedReceipt, expectedSigner?: str
   const matchesExpected =
     expectedSigner === undefined || recovered.toLowerCase() === expectedSigner.toLowerCase();
   return { valid: matchesRecovery && matchesExpected, recovered };
+}
+
+export interface ReceiptVerification {
+  readonly valid: boolean;
+  readonly recovered: Address;
+  /** Resolved key id when the receipt carries one. */
+  readonly keyId?: string;
+  /** True when the recovered signer matches the configured key history. */
+  readonly knownKey: boolean;
+}
+
+/**
+ * Verify a receipt, optionally against the active + historical signer keys so
+ * a receipt issued before a rotation still verifies. Falls back to the
+ * self-declared signer address when no key history is configured.
+ */
+export async function verifyReceiptWithHistory(
+  receipt: SignedReceipt,
+  keyHistory?: readonly string[],
+): Promise<ReceiptVerification> {
+  const recovered = await recoverMessageAddress({ message: receipt.payload, signature: receipt.signature });
+  const matchesDeclared = recovered.toLowerCase() === receipt.signer.toLowerCase();
+  const configured = new Set<string>();
+  const active = (process.env["RECEIPT_SIGNER_KEY"] ?? "").trim();
+  if (active !== "") configured.add(privateKeyToAccount(parseSignerKey(active, "RECEIPT_SIGNER_KEY")).address.toLowerCase());
+  for (const entry of keyHistory ?? []) configured.add(entry.toLowerCase());
+  for (const account of loadHistoricalReceiptAccounts()) configured.add(account.address.toLowerCase());
+
+  const expectedKeyId =
+    receipt.keyId ?? (receipt.signer ? receiptKeyIdFor(receipt.signer) : undefined);
+  const knownKey =
+    configured.size === 0 ||
+    configured.has(recovered.toLowerCase()) ||
+    expectedKeyId === receiptKeyIdFor(recovered);
+  const keyIdMatches =
+    receipt.keyId === undefined || receipt.keyId === receiptKeyIdFor(recovered);
+  return {
+    valid: matchesDeclared && keyIdMatches && knownKey,
+    recovered,
+    ...(expectedKeyId !== undefined ? { keyId: expectedKeyId } : {}),
+    knownKey,
+  };
 }
 
 // ---- Malware hook (ClamAV INSTREAM) ----

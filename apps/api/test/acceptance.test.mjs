@@ -867,6 +867,7 @@ describe("Phase 11 acceptance (one app, scripted chain)", () => {  before(async 
       sellerCostUnits: "1000000",
       expectedPhase: 4,
       agreementDigest: EXPLICIT_AGREEMENT,
+      settlementNonce: "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
     };
     const created1 = ok(
       await call(app, buyer, "POST", `/deals/${dealId}/settlement-proposals`, base),

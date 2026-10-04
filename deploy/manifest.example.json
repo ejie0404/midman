@@ -33,6 +33,25 @@
     "outage-v1": "0xcf092d5c3dc67e90f46374b85e5c646b9a443d80d7e466c27d2ee7f301d94e22",
     "catastrophic-v1": "0xdafba6e467ff5b83d4d9c50fe4d6480369ffa7f4eecf2e07661687de6e112a92"
   },
+  "policyValues": {
+    "category-v1": { "minInspectionSeconds": "3600" },
+    "readiness-v1": { "required": false },
+    "bond-v1": { "claimantBondUnits": "5000000", "respondentBondUnits": "5000000" },
+    "arbitration-v1": { "tiersAllowed": "7" },
+    "outage-v1": { "gracePeriodSeconds": "1800", "maxIntervals": "8" }
+  },
+  "governance": {
+    "rotationDelaySeconds": "259200",
+    "unpauseDelaySeconds": "86400",
+    "vetoQuorum": "2",
+    "minPanelSizes": { "primary": "5", "fallback": "5", "veto": "3" }
+  },
+  "hubTiers": [
+    { "name": "T1", "maxPrincipalUnits": "1000000000", "primaryQuorum": "2", "fallbackQuorum": "2", "executionDelaySeconds": "86400" },
+    { "name": "T2", "maxPrincipalUnits": "10000000000", "primaryQuorum": "3", "fallbackQuorum": "3", "executionDelaySeconds": "172800" },
+    { "name": "T3", "unbounded": true, "primaryQuorum": "3", "fallbackQuorum": "3", "executionDelaySeconds": "259200" }
+  ],
+  "expectedPrincipals": [],
   "domain": {
     "name": "MidmanEscrow",
     "version": "1",
@@ -62,12 +81,12 @@
   },
   "releaseCommit": "<40-hex placeholder>",
   "freezeDate": null,
-  "notes": "Example release manifest for the Phase 12 release freeze. USDC and sequencer feed are the pinned Base mainnet addresses; all other deployment addresses, role holders, bytecode hashes and the release commit remain unresolved placeholders until the deployment script runs and the independent review closes. Policy hashes are computed from deploy/policies/*.json by scripts/policy-hash.mjs.",
+  "notes": "Example release manifest for the Phase 12 release freeze. USDC and sequencer feed are the pinned Base mainnet addresses; all other deployment addresses, role holders, bytecode hashes and the release commit remain unresolved placeholders until the deployment script runs and the independent review closes. Policy hashes are computed from deploy/policies/*.json by scripts/policy-hash.mjs; policyValues/governance/hubTiers are the registered on-chain VALUES that scripts/verify-deployment.mjs reads back. bytecodeHashes.MidmanHub is advisory only: the hub is linked against HubDispute, so live hub code contains the library address and differs from the pre-link artifact hash; the authoritative library check is contracts.disputeLibrary + link.hub.",
   "unresolved": [
     "RB-06: policy records are recorded/hashed but concrete Base mainnet addresses for policies, hub, disputeLibrary, domain.verifyingContract and every role holder are pending architecture/fork decision.",
-    "Reviewer identities: primary, fallback and veto panel membership are placeholders until independently staffed and keyed; primary/fallback must be disjoint.",
+    "Reviewer identities: primary, fallback and veto panel membership are placeholders until independently staffed and keyed; primary/fallback must be disjoint and each house must be large enough to meet the tier/veto quorums.",
     "Audit completion: external contract and application security review findings must be resolved and remediation evidence attached before deploymentStatus can leave UNVERIFIED_PLACEHOLDER.",
     "releaseCommit and freezeDate are placeholders until the audited source and dependency lockfile are frozen.",
-    "bytecodeHashes: compiled artifacts must be built from the frozen commit and the keccak256 of deployedBytecode recorded in this manifest."
+    "bytecodeHashes: compiled artifacts must be built from the frozen commit and the keccak256 of deployedBytecode recorded; MidmanHub's entry is advisory because the hub is library-linked."
   ]
 }

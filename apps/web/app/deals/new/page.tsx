@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { keccak256, stringToHex, type Address } from "viem";
 import { quoteFee } from "@midman/shared";
 import { createDraft, inviteDraft, ApiError } from "../../../lib/api";
@@ -10,11 +10,15 @@ import {
   CATEGORIES,
   CATEGORY_MINIMUMS,
   FEE_ALLOCATIONS,
-  arbitrationCostRecipient,
   isHexAddress,
-  platformFeeRecipient,
 } from "../../../lib/deal";
-import { button, card, error, input, label, mono, ok, page, secondaryButton } from "../../components/styles";
+import {
+  agreementBindingFromDefaults,
+  describeAgreement,
+  fetchDealDefaults,
+  type DealDefaults,
+} from "../../../lib/dealDefaults";
+import { button, card, error, input, label, mono, ok, page, secondaryButton, warning } from "../../components/styles";
 
 function toSeconds(hours: string): number | null {
   if (!/^\d+(\.\d+)?$/.test(hours.trim())) return null;
@@ -37,7 +41,30 @@ export default function NewDealPage() {
   const [token, setToken] = useState<string>(USDC_ADDRESS);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [defaults, setDefaults] = useState<DealDefaults | null>(null);
+  const [defaultsError, setDefaultsError] = useState<string | null>(null);
   const [result, setResult] = useState<{ draftId: string; dealId: string; inviteUrl: string } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const loaded = await fetchDealDefaults();
+        if (!cancelled) setDefaults(loaded);
+      } catch (e) {
+        if (!cancelled) {
+          setDefaultsError(
+            e instanceof Error
+              ? `Verified deal configuration unavailable (${e.message}). Refusing to build a draft with empty policy ids.`
+              : "Verified deal configuration unavailable.",
+          );
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const preview = useMemo(() => {
     try {
@@ -83,7 +110,7 @@ export default function NewDealPage() {
     try {
       if (!isHexAddress(creatorWallet)) throw new Error("Creator wallet must be a 0x address");
       if (!isHexAddress(counterparty)) throw new Error("Counterparty must be a 0x address");
-      if (!isHexAddress(hub) || !isHexAddress(token)) throw new Error("Hub and token must be 0x addresses");
+      if (!defaults) throw new Error(defaultsError ?? "Verified deal configuration is not loaded yet");
       if (!preview || "error" in preview || !preview.principalUnits) throw new Error(preview?.error ?? "Invalid preview");
       const deliverySeconds = toSeconds(deliveryHours);
       const inspectionSeconds = toSeconds(inspectionHours);
@@ -91,6 +118,9 @@ export default function NewDealPage() {
       const buyer = (role === "buyer" ? creatorWallet : counterparty) as Address;
       const seller = (role === "buyer" ? counterparty : creatorWallet) as Address;
       const agreementHash = keccak256(stringToHex(description.trim() === "" ? `midman:${Date.now()}` : description));
+      // Agreement binding comes ONLY from verified configuration: real hub,
+      // USDC, chain id, the eight policy ids, and the configured recipients.
+      const binding = agreementBindingFromDefaults(defaults);
       const terms = {
         buyer,
         seller,
@@ -100,12 +130,12 @@ export default function NewDealPage() {
         inspectionSeconds,
         category,
         agreementHash,
-        policyIds: {},
-        platformFeeRecipient: platformFeeRecipient(creatorWallet),
-        arbitrationCostRecipient: arbitrationCostRecipient(creatorWallet),
-        hub,
-        token,
-        chainId: CHAIN_ID,
+        policyIds: binding.policyIds,
+        platformFeeRecipient: binding.platformFeeRecipient,
+        arbitrationCostRecipient: binding.arbitrationCostRecipient,
+        hub: binding.hub,
+        token: binding.token,
+        chainId: binding.chainId,
         fundingDays: 7,
       };
       const body: { creatorWallet: string; terms: Record<string, unknown>; counterpartyHint?: string } = {
@@ -256,8 +286,31 @@ export default function NewDealPage() {
         )}
       </div>
 
+      {defaultsError ? <div style={warning}>{defaultsError}</div> : null}
+      {defaults ? (
+        <div style={card}>
+          <h3>Verified agreement binding (from /config/deal-defaults)</h3>
+          <ul style={{ fontSize: 13 }}>
+            <li>
+              hub <span style={mono}>{describeAgreement(defaults).hub}</span> · USDC{" "}
+              <span style={mono}>{describeAgreement(defaults).token}</span> · chainId{" "}
+              {describeAgreement(defaults).chainId}
+            </li>
+            <li>
+              platform fee recipient <span style={mono}>{defaults.platformFeeRecipient}</span> · arbitration cost
+              recipient <span style={mono}>{defaults.arbitrationCostRecipient}</span>
+            </li>
+            {describeAgreement(defaults).policies.map((p) => (
+              <li key={p.slot}>
+                {p.slot}: <span style={mono}>{p.id}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       {submitError ? <div style={error}>{submitError}</div> : null}
-      <button type="button" style={button} disabled={submitting} onClick={() => void submit()}>
+      <button type="button" style={button} disabled={submitting || !defaults} onClick={() => void submit()}>
         {submitting ? "Creating…" : "Create draft + invite link"}
       </button>
     </main>

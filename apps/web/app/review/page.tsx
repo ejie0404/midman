@@ -14,6 +14,7 @@ import {
 } from "../../lib/review";
 import { ApiError } from "../../lib/api";
 import { connectEvidenceAuth } from "../components/evidenceAuth";
+import SessionBadge from "../components/SessionBadge";
 import Countdown from "../components/Countdown";
 import { button, card, error, mono, nav, ok, page, secondaryButton, warning } from "../components/styles";
 
@@ -89,6 +90,8 @@ export default function ReviewConsolePage() {
           </button>
         ) : null}
       </div>
+
+      <SessionBadge title="Wallet session (reviewer)" />
 
       {status === "missing" ? <div style={warning}>{REVIEW_MISSING_COPY}</div> : null}
       {status === "denied" ? <div style={warning}>{REVIEWER_DENIED_COPY}</div> : null}

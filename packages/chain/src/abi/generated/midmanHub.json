@@ -4,7 +4,7 @@
   "artifact": "packages/contracts/out/MidmanHub.sol/MidmanHub.json",
   "libraryArtifact": "packages/contracts/out/HubDispute.sol/HubDispute.json",
   "solc": "0.8.26+commit.8a97fa7a",
-  "generatedAt": "2026-10-04T16:03:45.597Z",
+  "abiHash": "1d3eed5554d923727b028e7f70aa3d2f1c5f9f9408d7c7c58a4bda531985bbd1",
   "abi": [
     {
       "type": "constructor",

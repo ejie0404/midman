@@ -12,6 +12,7 @@ import { button, card, error, mono, nav, ok, page, warning } from "../../compone
 import EvidenceSection from "../../components/EvidenceSection";
 import DisputeProgress from "../../components/DisputeProgress";
 import MessagesThread from "../../components/MessagesThread";
+import SessionBadge from "../../components/SessionBadge";
 
 function stepIndex(view: ReturnType<typeof useDeal>): number {
   const phase = view.dealStatus?.phase;
@@ -60,6 +61,8 @@ export default function DealDashboard({ params }: { params: Promise<{ id: string
       <p style={nav}>
         <a href="/">← Home</a>
       </p>
+
+      <SessionBadge />
 
       <div style={card}>
         <h2>

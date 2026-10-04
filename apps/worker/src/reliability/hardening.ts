@@ -25,6 +25,7 @@ import {
   createWalletClient,
   decodeFunctionData,
   http,
+  keccak256,
   type Address,
   type Hash,
   type Hex,
@@ -37,6 +38,7 @@ import { estimateGasWithBuffer, type GasClient, type GasEstimate } from "./gas.j
 import { AbuseControls } from "./abuse.js";
 import { SponsorshipBudget } from "./budget.js";
 import { RpcPool } from "./rpcPool.js";
+import { SponsorNonceCoordinator } from "./nonce.js";
 
 /** Documented action -> on-chain functionName allow-list. `fund` must decode
  * as `fund`; every other action maps to its identically named hub function. */
@@ -71,30 +73,104 @@ export interface CalldataValidation {
   readonly reason: string;
 }
 
+export interface CalldataValidationOptions {
+  /** Configured hub address; a job whose `to`/`target` disagrees is rejected. */
+  readonly hub?: Address | null;
+}
+
+/** Raw calldata for a job, accepting the legacy `data` and the API `calldata`. */
+export function relayCalldataOf(job: { readonly params: Record<string, unknown> }): string | null {
+  for (const field of ["data", "calldata"]) {
+    const value = job.params[field];
+    if (typeof value === "string" && /^0x[0-9a-fA-F]*$/.test(value) && value.length >= 10) return value;
+  }
+  return null;
+}
+
+/** Extract the dealId a decoded calldata is bound to, if discoverable. */
+function decodedDealId(args: readonly unknown[] | undefined): string | null {
+  if (!args || args.length === 0) return null;
+  const first = args[0] as unknown;
+  if (typeof first === "string" && /^0x[0-9a-fA-F]{64}$/.test(first)) return first;
+  if (first !== null && typeof first === "object") {
+    const nested = (first as { dealId?: unknown }).dealId;
+    if (typeof nested === "string") return nested;
+  }
+  for (const arg of args) {
+    if (arg !== null && typeof arg === "object") {
+      const nested = (arg as { dealId?: unknown }).dealId;
+      if (typeof nested === "string") return nested;
+    }
+  }
+  return null;
+}
+
 /**
- * Decode a job's calldata with HUB_ABI and assert the function name is allowed
- * for the job's action. `data` defaults to `job.params.data` (the pre-encoded
- * path used by fund / evidence / ruling jobs).
+ * Decode a job's calldata with HUB_ABI and assert:
+ *   * the encoded function is allowed for the job's action,
+ *   * the calldata's dealId is bound to the job's dealId (blocks a deal-A
+ *     metadata record paired with deal-B calldata),
+ *   * `fund` decodes as the full fund struct (not a bare selector), and
+ *   * any explicit `to`/`target` matches the configured hub.
+ * `data` defaults to `job.params.data` or `job.params.calldata` (the API emits
+ * `calldata`); the legacy `data` spelling stays accepted.
  */
 export function validateRelayJob(
   job: { readonly action: string; readonly params: Record<string, unknown> },
   data?: string | null,
+  options: CalldataValidationOptions = {},
 ): CalldataValidation {
-  const fallback = data ?? (typeof job.params["data"] === "string" ? (job.params["data"] as string) : null);
+  const fallback = data ?? relayCalldataOf(job);
   if (fallback === null || !/^0x[0-9a-fA-F]*$/.test(fallback) || fallback.length < 10) {
     return { ok: false, functionName: null, reason: "no-calldata" };
   }
-  let functionName: string | null = null;
+  const target = job.params["to"] ?? job.params["target"];
+  if (
+    options.hub !== undefined &&
+    options.hub !== null &&
+    typeof target === "string" &&
+    target.toLowerCase() !== options.hub.toLowerCase()
+  ) {
+    return { ok: false, functionName: null, reason: "target-mismatch" };
+  }
+  let decoded: { functionName: string; args: readonly unknown[] } | null = null;
   try {
-    const decoded = decodeFunctionData({ abi: HUB_ABI, data: fallback as Hex });
-    functionName = typeof decoded.functionName === "string" ? decoded.functionName : null;
+    const result = decodeFunctionData({ abi: HUB_ABI, data: fallback as Hex });
+    decoded = { functionName: String(result.functionName), args: result.args ?? [] };
   } catch {
     return { ok: false, functionName: null, reason: "undecodable-calldata" };
   }
+  const functionName = decoded.functionName;
   const allowed = ACTION_FUNCTION_MAP[job.action];
   if (allowed === undefined) return { ok: false, functionName, reason: "unknown-action" };
-  if (functionName === null || !allowed.includes(functionName)) {
+  if (!allowed.includes(functionName)) {
     return { ok: false, functionName, reason: "action-calldata-mismatch" };
+  }
+  const ZERO32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
+  const expectedDealId = job.params["dealId"];
+  if (typeof expectedDealId === "string") {
+    const bound = decodedDealId(decoded.args);
+    // An all-zero dealId in calldata is a placeholder used by legacy builders,
+    // so it is treated as unspecified; any concrete mismatch is rejected.
+    if (bound !== null && bound.toLowerCase() !== ZERO32 && bound.toLowerCase() !== expectedDealId.toLowerCase()) {
+      return { ok: false, functionName, reason: "deal-mismatch" };
+    }
+    if (bound === null && job.action === "fund") {
+      return { ok: false, functionName, reason: "fund-struct-undecoded" };
+    }
+  }
+  if (job.action === "fund") {
+    const term = decoded.args[0] as { dealId?: unknown } | null | undefined;
+    if (term === null || typeof term !== "object" || typeof term.dealId !== "string") {
+      return { ok: false, functionName, reason: "fund-struct-undecoded" };
+    }
+    const expectedNonce = job.params["nonce"];
+    if (typeof expectedNonce === "string" && expectedNonce.startsWith("0x")) {
+      const termNonce = (term as { nonce?: unknown }).nonce;
+      if (typeof termNonce === "string" && termNonce.toLowerCase() !== expectedNonce.toLowerCase()) {
+        return { ok: false, functionName, reason: "nonce-mismatch" };
+      }
+    }
   }
   return { ok: true, functionName, reason: "ok" };
 }
@@ -110,9 +186,21 @@ export interface RelayTxRequest {
   readonly maxPriorityFeePerGas?: bigint;
 }
 
+export interface SignedRelayTx {
+  readonly raw: Hex;
+  readonly hash: Hash;
+}
+
 export interface RelayTransport {
   getNonce(): Promise<number>;
   send(tx: RelayTxRequest): Promise<Hash>;
+  /**
+   * Optional two-phase path: sign locally so the raw transaction + hash can be
+   * persisted BEFORE broadcast (ambiguous timeouts are then resolvable). When
+   * absent the legacy single-phase `send` is used.
+   */
+  sign?(tx: RelayTxRequest): Promise<SignedRelayTx>;
+  sendRaw?(raw: Hex): Promise<Hash>;
 }
 
 export interface HardeningSponsor {
@@ -138,7 +226,7 @@ function envInt(name: string, fallback: number): number {
 }
 
 function defaultBuildCalldata(_action: string, _dealId: Hash, params: Record<string, unknown>): Hash | null {
-  const data = params["data"];
+  const data = params["data"] ?? params["calldata"];
   return typeof data === "string" && data.startsWith("0x") ? (data as Hash) : null;
 }
 
@@ -197,19 +285,23 @@ export interface RelayProcessorOptions {
 /**
  * RelayProcessor owns the submission state machine for relay jobs.
  *
- * Lease algorithm (atomic + crash recovery):
- *   claim = store.claimRelay(key)            // atomic UPDATE ... WHERE queued
- *   if claim: stampLease(claim)              // status stays 'processing'
- *   else if getRelay(key).status == 'processing':
- *        age = now - result.leaseAt          // missing leaseAt => treat as stale
- *        if age >= LEASE_TTL_SECONDS:
- *           finishRelay(key,'queued',...)    // requeue
- *           claimRelay(key)                  // reclaim (attempt++)
+ * Lease algorithm (DB-owned, ownership verified):
+ *   claim = store.claimRelayLease(key, owner, ttl)
+ *     // atomic: queued OR processing-with-expired-lease -> processing
+ *     // sets lease_owner/lease_expires_at/version
+ *   before any mutation: renewRelayLease(key, owner, ttl) must succeed,
+ *     otherwise the worker lost its lease and refuses to mutate (stale owner).
+ *   A live lease owned by another worker is never stolen; the legacy
+ *   result.leaseAt stamp is still honoured for pre-lease rows.
  *
- * Nonce algorithm (single in-flight sponsored tx):
- *   serialize sends on a promise chain; on first send fetch the pending nonce
- *   once, then increment locally for every subsequent send. A failed send
- *   clears the cached nonce so the next attempt re-reads the pending count.
+ * Nonce algorithm (durable, cross-worker):
+ *   SponsorNonceCoordinator reserves the next nonce through store.nextSeq,
+ *   seeded from the chain pending count only when no reservation exists, and
+ *   persists the high-water mark so two workers never reuse a nonce.
+ *
+ * Tx identity: with a two-phase transport the signed tx (hash + raw) is
+ * persisted BEFORE broadcast; an ambiguous timeout leaves the job 'submitted'
+ * (never 'failed') and the same signed tx can be rebroadcast.
  */
 export class RelayProcessor {
   private readonly store: Store;
@@ -225,11 +317,12 @@ export class RelayProcessor {
   private readonly leaseTtlSeconds: number;
   private readonly maxAttempts: number;
   private readonly leaseOwner: string;
+  private readonly sponsorAddress: Address | null;
+  private readonly nonce: SponsorNonceCoordinator | null;
   private readonly submittedKeys = new Set<string>();
   private transport: RelayTransport | null;
   private gasClient: GasClient | null;
   private sendChain: Promise<unknown> = Promise.resolve();
-  private localNonce: number | null = null;
 
   constructor(options: RelayProcessorOptions) {
     this.store = options.store;
@@ -244,9 +337,17 @@ export class RelayProcessor {
     this.now = options.now ?? (() => Math.floor(Date.now() / 1_000));
     this.leaseTtlSeconds = options.leaseTtlSeconds ?? envInt("RELAY_LEASE_TTL_SECONDS", 120);
     this.maxAttempts = options.maxAttempts ?? envInt("RELAY_MAX_ATTEMPTS", 5);
-    this.leaseOwner = `worker-${process.pid}-${Math.floor(this.now())}`;
+    // Distinct per instance (not per-process) so two in-process workers cannot
+    // masquerade as each other's lease owner.
+    this.leaseOwner = `worker-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
     this.transport = options.transport ?? null;
     this.gasClient = options.gasClient ?? null;
+    const sponsorKey = this.sponsor?.key ?? null;
+    this.sponsorAddress = sponsorKey !== null ? privateKeyToAccount(sponsorKey as Hex).address : null;
+    this.nonce =
+      this.sponsorAddress !== null
+        ? new SponsorNonceCoordinator(this.store, () => this.ensureTransport().getNonce())
+        : null;
   }
 
   /** Keys submitted by this processor; fed to reconcileSubmitted each pass. */
@@ -254,9 +355,27 @@ export class RelayProcessor {
     return [...this.submittedKeys];
   }
 
+  /** The worker identity used for lease ownership (owner + version checks). */
+  ownerId(): string {
+    return this.leaseOwner;
+  }
+
   async process(idempotencyKey: string): Promise<RelayProcessResult> {
     const existing = await this.store.getRelay(idempotencyKey);
     if (!existing) return { status: "missing", txHash: null };
+
+    // (3) Reconcile a persisted tx identity BEFORE building anything new. A
+    // job with a known hash is never re-minted; if the receipt is not visible
+    // yet the job stays 'submitted' (unresolved), never 'failed'.
+    if (existing.txHash && (existing.status === "submitted" || existing.status === "unresolved" || existing.status === "processing")) {
+      if (this.reader) {
+        const resolved = await this.reconcileOne(existing);
+        if (resolved !== null) return resolved;
+        return { status: "submitted", txHash: existing.txHash, reason: "receipt-pending" };
+      }
+      return { status: "already-handled", txHash: existing.txHash };
+    }
+
     if (existing.status !== "queued" && existing.status !== "processing") {
       return { status: "already-handled", txHash: existing.txHash };
     }
@@ -290,19 +409,24 @@ export class RelayProcessor {
       await this.retire(existing, "failed", "no-calldata");
       return { status: "failed", txHash: null, reason: "no-calldata" };
     }
-    const validation = validateRelayJob(existing, data);
+    const validation = validateRelayJob(existing, data, { hub: this.hub });
     if (!validation.ok) {
       const reason = `calldata-mismatch:${validation.reason}:${validation.functionName ?? "?"}`;
       await this.retire(existing, "failed", reason);
       return { status: "failed", txHash: null, reason, functionName: validation.functionName };
     }
 
-    const job = await this.lease(idempotencyKey);
-    if (!job) return { status: "already-handled", txHash: existing.txHash };
+    const job = await this.claim(existing);
+    if (!job) return { status: "already-handled", txHash: existing.txHash, reason: "lease-held" };
     if (job.attempts > this.maxAttempts) {
       await this.retire(job, "failed", "max-attempts-exceeded");
       return { status: "failed", txHash: null, reason: "max-attempts-exceeded" };
     }
+
+    // Ownership check: if our lease was lost to another worker (or reaped),
+    // refuse to mutate the job — a stale owner must never overwrite state.
+    const owned = await this.store.renewRelayLease(idempotencyKey, this.leaseOwner, this.leaseTtlSeconds);
+    if (!owned) return { status: "already-handled", txHash: existing.txHash, reason: "lease-lost" };
 
     // No sponsor => hand back unsigned calldata (operator can submit manually).
     if (!this.sponsor || !this.sponsor.key || !this.sponsor.rpcUrl) {
@@ -328,35 +452,184 @@ export class RelayProcessor {
     }
 
     // Legacy daily transaction cap kept for parity with the previous path.
-    const spent = await this.store.countSponsorsSince(new Date((this.now() - 86_400) * 1_000).toISOString());
+    const sinceIso = new Date((this.now() - 86_400) * 1_000).toISOString();
+    const spent = await this.store.countSponsorsSince(sinceIso);
     if (spent >= this.sponsor.dailyCapTxs) {
       await this.store.finishRelay(idempotencyKey, "unsigned", null, { to: this.hub, data, reason: "daily-cap" });
       return { status: "unsigned", txHash: null, reason: "daily-cap" };
     }
 
+    // (6) Reserve sponsorship atomically before send. The reservation is a
+    // durable ledger row, so concurrent workers cannot both spend the last
+    // unit of budget, and the spend survives a restart.
+    const attemptId = `${idempotencyKey}#${job.attempts}`;
+    const reservation = await this.store.reserveSponsorship(
+      `reserve:${attemptId}`,
+      dealIdOf(job),
+      job.action,
+      this.sponsor.dailyCapTxs,
+      sinceIso,
+    );
+    if (!reservation.granted) {
+      await this.store.finishRelay(idempotencyKey, "unsigned", null, { to: this.hub, data, reason: "budget-exhausted" });
+      return { status: "unsigned", txHash: null, reason: "budget-exhausted" };
+    }
+
     try {
-      const request: RelayTxRequest = this.txRequest(this.hub, data, 0);
-      const txHash = await this.serializeSend(async (nonce) => {
-        const withNonce: RelayTxRequest = { ...request, nonce };
-        return this.ensureTransport().send(withNonce);
+      const outcome = await this.serializeSend(async () => {
+        const nonce = this.nonce ? await this.nonce.allocate(this.sponsorAddress as Address) : 0;
+        const request: RelayTxRequest = {
+          ...this.txRequest(this.hub as Address, data, nonce),
+          gas: estimate.gasLimit,
+          ...(estimate.maxFeePerGas !== undefined ? { maxFeePerGas: estimate.maxFeePerGas } : {}),
+          ...(estimate.maxPriorityFeePerGas !== undefined ? { maxPriorityFeePerGas: estimate.maxPriorityFeePerGas } : {}),
+        };
+        const transport = this.ensureTransport();
+        if (typeof transport.sign === "function") {
+          const signed = await transport.sign(request);
+          const attempt = {
+            id: attemptId,
+            sponsor: this.sponsorAddress,
+            nonce,
+            txHash: signed.hash,
+            raw: signed.raw,
+            gas: estimate.gasLimit.toString(),
+            maxFeePerGas: estimate.maxFeePerGas?.toString() ?? null,
+            maxPriorityFeePerGas: estimate.maxPriorityFeePerGas?.toString() ?? null,
+            reservedAt: this.now(),
+            costWei: estimate.costWei.toString(),
+          };
+          // Persist identity + raw signed tx BEFORE broadcast.
+          await this.store.finishRelay(idempotencyKey, "submitted", signed.hash, {
+            to: this.hub,
+            data,
+            attempt,
+          });
+          if (typeof transport.sendRaw === "function") {
+            try {
+              const broadcast = await transport.sendRaw(signed.raw);
+              if (broadcast !== signed.hash) {
+                await this.store.finishRelay(idempotencyKey, "submitted", broadcast, {
+                  to: this.hub,
+                  data,
+                  attempt: { ...attempt, txHash: broadcast, rebroadcastHash: signed.hash },
+                });
+                return { status: "submitted" as const, txHash: broadcast, unresolved: false };
+              }
+            } catch (error) {
+              // Ambiguous transport failure: the tx may be on-chain. Keep the
+              // persisted hash and stay 'submitted'; never mark 'failed'.
+              return { status: "submitted" as const, txHash: signed.hash, unresolved: true };
+            }
+          }
+          return { status: "submitted" as const, txHash: signed.hash, unresolved: false };
+        }
+        // Legacy single-phase transport: send, then persist the outcome.
+        const txHash = await transport.send(request);
+        return { status: "submitted" as const, txHash, unresolved: false, nonce };
       });
-      await this.store.recordSponsor(txHash, dealIdOf(job), job.action);
-      if (this.budget) this.budget.record(txHash, estimate.costWei, this.now());
-      await this.store.finishRelay(idempotencyKey, "submitted", txHash, { to: this.hub, data });
-      this.submittedKeys.add(idempotencyKey);
+
+      if (outcome.unresolved) {
+        this.submittedKeys.add(idempotencyKey);
+        auditLog({
+          actor: "relay",
+          action: `relay.${job.action}.unresolved`,
+          ...(dealIdOf(job) !== null ? { dealId: dealIdOf(job)! } : {}),
+          details: { txHash: outcome.txHash, attemptId },
+        });
+        return { status: "submitted", txHash: outcome.txHash, reason: "unresolved" };
+      }
+
+      if ((outcome as { nonce?: number }).nonce === undefined) {
+        // Two-phase path already persisted the job as submitted.
+        this.submittedKeys.add(idempotencyKey);
+      } else {
+        await this.store.finishRelay(idempotencyKey, "submitted", outcome.txHash, {
+          to: this.hub,
+          data,
+          sponsor: this.sponsorAddress,
+          attempt: { id: attemptId, nonce: (outcome as { nonce?: number }).nonce ?? null },
+        });
+        this.submittedKeys.add(idempotencyKey);
+      }
+      if (this.budget) this.budget.record(outcome.txHash, estimate.costWei, this.now());
       auditLog({
         actor: "relay",
         action: `relay.${job.action}.submitted`,
         ...(dealIdOf(job) !== null ? { dealId: dealIdOf(job)! } : {}),
-        details: { txHash, gasLimit: estimate.gasLimit.toString(), fallback: estimate.fallback },
+        details: { txHash: outcome.txHash, gasLimit: estimate.gasLimit.toString(), fallback: estimate.fallback },
       });
-      return { status: "submitted", txHash };
+      return { status: "submitted", txHash: outcome.txHash };
     } catch (error) {
-      // Unknown outcome: never auto-resubmit; bounded retry or terminal fail.
-      this.localNonce = null;
+      // A synchronous pre-broadcast failure (signing/validation) may retry;
+      // ambiguous/timeouts are unresolved and never auto-resubmitted.
+      if (this.isUnresolved(error)) {
+        auditLog({
+          actor: "relay",
+          action: `relay.${job.action}.unresolved`,
+          ...(dealIdOf(job) !== null ? { dealId: dealIdOf(job)! } : {}),
+          details: { reason: error instanceof Error ? error.message : "unresolved" },
+        });
+        return { status: "unresolved", txHash: job.txHash };
+      }
       const reason = error instanceof Error ? error.message : "send-failed";
       return this.retryOrFail(job, reason);
     }
+  }
+
+  /**
+   * Rebroadcast the SAME persisted signed transaction (no new nonce, no new
+   * signature). Safe after an ambiguous timeout: the hash is unchanged.
+   */
+  async rebroadcast(idempotencyKey: string): Promise<RelayProcessResult> {
+    const job = await this.store.getRelay(idempotencyKey);
+    if (!job) return { status: "missing", txHash: null };
+    const attempt = (job.result?.["attempt"] ?? null) as { raw?: string; txHash?: string } | null;
+    if (!attempt || typeof attempt.raw !== "string") {
+      return { status: "no-signed-tx", txHash: job.txHash };
+    }
+    const transport = this.ensureTransport();
+    if (typeof transport.sendRaw !== "function") {
+      return { status: "no-raw-support", txHash: job.txHash };
+    }
+    try {
+      const hash = await transport.sendRaw(attempt.raw as Hex);
+      await this.store.finishRelay(idempotencyKey, "submitted", hash, job.result);
+      this.submittedKeys.add(idempotencyKey);
+      return { status: "submitted", txHash: hash };
+    } catch (error) {
+      return {
+        status: "unresolved",
+        txHash: job.txHash,
+        reason: error instanceof Error ? error.message : "rebroadcast-failed",
+      };
+    }
+  }
+
+  private isUnresolved(error: unknown): boolean {
+    const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+    return /timeout|timed out|etimedout|econnreset|socket hang up|already known|not known|replacement transaction|nonce too low|underpriced|network|503|502|429/.test(
+      message,
+    );
+  }
+
+  private async reconcileOne(job: RelayJob): Promise<RelayProcessResult | null> {
+    if (!this.reader || !job.txHash) return null;
+    let receipt: TransactionReceipt | null = null;
+    try {
+      receipt = await this.reader.getTransactionReceipt(job.txHash as Hash);
+    } catch {
+      receipt = null;
+    }
+    if (receipt === null) return null;
+    const status = receipt.status ? await receiptFinality(this.reader, receipt) : "reverted";
+    const result = {
+      ...(job.result ?? {}),
+      reason: receipt.status ? `receipt-${status}` : "receipt-reverted",
+      blockNumber: receipt.blockNumber.toString(),
+    };
+    await this.store.finishRelay(job.idempotencyKey, status, job.txHash, result);
+    return { status, txHash: job.txHash };
   }
 
   private abuseKey(job: RelayJob): string {
@@ -393,30 +666,25 @@ export class RelayProcessor {
     return { status: "retrying", txHash: null, reason };
   }
 
-  private async lease(idempotencyKey: string): Promise<RelayJob | null> {
-    const claimed = await this.store.claimRelay(idempotencyKey);
-    if (claimed) {
-      await this.stampLease(claimed);
-      return claimed;
+  /**
+   * Lease acquisition for this worker (owner + expiry + version live on the
+   * job row). A live lease means another worker owns it; a missing/expired
+   * lease is reclaimed via `claimRelayLease`. The legacy `result.leaseAt`
+   * stamp is still honoured so pre-lease rows recover the same way.
+   */
+  private async claim(existing: RelayJob): Promise<RelayJob | null> {
+    const key = existing.idempotencyKey;
+    if (existing.status === "processing" && existing.leaseOwner === this.leaseOwner) {
+      const renewed = await this.store.renewRelayLease(key, this.leaseOwner, this.leaseTtlSeconds);
+      if (renewed) return { ...existing, leaseExpiresAt: new Date(Date.now() + this.leaseTtlSeconds * 1_000).toISOString() };
     }
-    const current = await this.store.getRelay(idempotencyKey);
-    if (!current || current.status !== "processing") return null;
-    const at = leaseAtOf(current);
-    const stale = at === null ? true : this.now() - at >= this.leaseTtlSeconds;
-    if (!stale) return null;
-    // Crash recovery: requeue then reclaim. No reliable cross-process age is
-    // available from the base Store (relay_outbox.updated_at is not surfaced),
-    // so a missing leaseAt is treated as a crashed worker.
-    await this.store.finishRelay(idempotencyKey, "queued", current.txHash, current.result);
-    const reclaimed = await this.store.claimRelay(idempotencyKey);
-    if (!reclaimed) return null;
-    await this.stampLease(reclaimed);
-    return reclaimed;
-  }
-
-  private async stampLease(job: RelayJob): Promise<void> {
-    const result = { ...(job.result ?? {}), leaseAt: this.now(), leaseOwner: this.leaseOwner };
-    await this.store.finishRelay(job.idempotencyKey, "processing", job.txHash, result);
+    if (existing.status === "processing" && existing.leaseOwner !== this.leaseOwner) {
+      const expiry = existing.leaseExpiresAt ? Date.parse(existing.leaseExpiresAt) : null;
+      if (expiry !== null && Number.isFinite(expiry) && expiry > this.now() * 1_000) return null;
+      const legacyAt = leaseAtOf(existing);
+      if (expiry === null && legacyAt !== null && this.now() - legacyAt < this.leaseTtlSeconds) return null;
+    }
+    return this.store.claimRelayLease(key, this.leaseOwner, this.leaseTtlSeconds);
   }
 
   private txRequest(to: Address, data: Hash, nonce: number): RelayTxRequest {
@@ -424,9 +692,15 @@ export class RelayProcessor {
   }
 
   private async estimate(
-    job: RelayJob,
+    _job: RelayJob,
     data: Hash,
-  ): Promise<{ gasLimit: bigint; fallback: boolean; costWei: bigint }> {
+  ): Promise<{
+    gasLimit: bigint;
+    fallback: boolean;
+    costWei: bigint;
+    maxFeePerGas?: bigint;
+    maxPriorityFeePerGas?: bigint;
+  }> {
     const client = this.ensureGasClient();
     let estimate: GasEstimate;
     if (client) {
@@ -436,7 +710,15 @@ export class RelayProcessor {
       estimate = { gasLimit: fallbackLimit, fallback: true };
     }
     const fee = estimate.maxFeePerGas ?? 0n;
-    return { gasLimit: estimate.gasLimit, fallback: estimate.fallback, costWei: estimate.gasLimit * fee };
+    return {
+      gasLimit: estimate.gasLimit,
+      fallback: estimate.fallback,
+      costWei: estimate.gasLimit * fee,
+      ...(estimate.maxFeePerGas !== undefined ? { maxFeePerGas: estimate.maxFeePerGas } : {}),
+      ...(estimate.maxPriorityFeePerGas !== undefined
+        ? { maxPriorityFeePerGas: estimate.maxPriorityFeePerGas }
+        : {}),
+    };
   }
 
   private ensureGasClient(): GasClient | null {
@@ -466,18 +748,9 @@ export class RelayProcessor {
     return this.sponsor?.rpcUrl ?? null;
   }
 
-  private async nextNonce(): Promise<number> {
-    if (this.localNonce === null) {
-      this.localNonce = await this.ensureTransport().getNonce();
-    }
-    const nonce = this.localNonce;
-    this.localNonce = nonce + 1;
-    return nonce;
-  }
-
   /** Serialize all sponsored sends; one in-flight tx at a time. */
-  private async serializeSend<T>(fn: (nonce: number) => Promise<T>): Promise<T> {
-    const run = async (): Promise<T> => fn(await this.nextNonce());
+  private async serializeSend<T>(fn: () => Promise<T>): Promise<T> {
+    const run = async (): Promise<T> => fn();
     const result = this.sendChain.then(run, run);
     this.sendChain = result.then(
       () => undefined,
@@ -530,31 +803,82 @@ function createProductionTransport(sponsor: HardeningSponsor, rpcPool: RpcPool |
         throw error;
       }
     },
+    async sign(tx: RelayTxRequest): Promise<SignedRelayTx> {
+      const url = pickUrl();
+      const wallet = createWalletClient({ account, chain: base, transport: http(url) });
+      const request = await wallet.prepareTransactionRequest({
+        account,
+        chain: base,
+        to: tx.to,
+        data: tx.data,
+        nonce: tx.nonce,
+        ...(tx.gas !== undefined ? { gas: tx.gas } : {}),
+        ...(tx.maxFeePerGas !== undefined ? { maxFeePerGas: tx.maxFeePerGas } : {}),
+        ...(tx.maxPriorityFeePerGas !== undefined ? { maxPriorityFeePerGas: tx.maxPriorityFeePerGas } : {}),
+      });
+      const raw = await wallet.signTransaction(request);
+      return { raw, hash: keccak256(raw) };
+    },
+    async sendRaw(raw: Hex): Promise<Hash> {
+      const url = pickUrl();
+      const client = createPublicClient({ chain: base, transport: http(url) });
+      try {
+        return await client.sendRawTransaction({ serializedTransaction: raw });
+      } catch (error) {
+        if (rpcPool) rpcPool.markFailure(url);
+        throw error;
+      }
+    },
   };
+}
+
+/**
+ * Classify a receipt's finality. A single receipt is only a *tentative*
+ * confirmation: it becomes terminal ('finalized') only once its block is at or
+ * below the chain's finalized head. Without finality support (reader lacking
+ * getBlockByTag, or pre-finality chains) the job stays 'confirmed' and is
+ * re-checked on the next pass, so a reorg can still orphan it.
+ */
+async function receiptFinality(
+  reader: ChainReader,
+  receipt: TransactionReceipt,
+): Promise<"confirmed" | "finalized"> {
+  try {
+    const finalized = await reader.getBlockByTag("finalized");
+    if (finalized !== null && receipt.blockNumber <= finalized.number) return "finalized";
+  } catch {
+    // fall through to tentative confirmation
+  }
+  return "confirmed";
 }
 
 // ---- Receipt reconciliation ----
 
+export type ReconcileStatus = "finalized" | "confirmed" | "reverted" | "orphaned" | "pending";
+
 export interface ReconcileOutcome {
   readonly key: string;
   readonly txHash: string;
-  readonly status: "confirmed" | "reverted" | "pending";
+  readonly status: ReconcileStatus;
   readonly reason: string;
 }
 
-/** Optional store capability (not on the base Store interface). */
-export interface RelayStatusLister {
-  listRelayByStatus?(status: string): Promise<RelayJob[]>;
-}
+const RECONCILE_STATUSES = ["submitted", "confirmed", "unresolved"] as const;
+const RECONCILE_LIMIT = 500;
 
 /**
- * Resolve 'submitted' jobs against chain receipts.
- *   success  -> 'confirmed'
- *   reverted -> 'reverted'  (the exact reason: receipt.status === false)
- *   no receipt yet / unreadable -> left 'submitted' (unknown outcome; never
- *   resubmitted automatically).
- * Jobs are discovered through an optional `store.listRelayByStatus('submitted')`
- * and/or the explicit `keys` (the processor's own submitted set).
+ * Resolve submitted (and tentatively confirmed) jobs against chain receipts.
+ *
+ *   success below the finalized head -> 'finalized' (terminal)
+ *   success above the finalized head  -> 'confirmed' (tentative; re-checked)
+ *   reverted                         -> 'reverted'  (terminal)
+ *   no receipt now but was confirmed -> 'orphaned'  (reorg corrected)
+ *   no receipt yet                   -> left 'submitted' (unknown outcome)
+ *
+ * A single receipt never permanently confirms a job: 'confirmed' rows are
+ * re-listed on every pass and only 'finalized' is terminal. Jobs are
+ * discovered through the mandatory `store.listRelayByStatus` query plus any
+ * explicitly supplied keys.
  */
 export async function reconcileSubmitted(
   store: Store,
@@ -565,17 +889,12 @@ export async function reconcileSubmitted(
   if (!reader) return outcomes;
 
   const jobs: RelayJob[] = [];
-  const lister = store as unknown as RelayStatusLister;
-  if (typeof lister.listRelayByStatus === "function") {
-    try {
-      jobs.push(...(await lister.listRelayByStatus("submitted")));
-    } catch {
-      // optional capability failed; fall back to explicit keys
-    }
+  for (const status of RECONCILE_STATUSES) {
+    jobs.push(...(await store.listRelayByStatus(status, RECONCILE_LIMIT)));
   }
   for (const key of keys) {
     const job = await store.getRelay(key);
-    if (job && job.status === "submitted" && job.txHash) jobs.push(job);
+    if (job && job.txHash && (RECONCILE_STATUSES as readonly string[]).includes(job.status)) jobs.push(job);
   }
 
   const seen = new Set<string>();
@@ -590,12 +909,31 @@ export async function reconcileSubmitted(
       receipt = null;
     }
     if (receipt === null) {
-      outcomes.push({ key: job.idempotencyKey, txHash, status: "pending", reason: "no-receipt" });
+      if (job.status === "confirmed") {
+        // Previously mined, now absent: the block was reorged away.
+        const result = { ...(job.result ?? {}), reason: "receipt-disappeared" };
+        await store.finishRelay(job.idempotencyKey, "orphaned", txHash, result);
+        const dealId = dealIdOf(job);
+        auditLog({
+          actor: "reconcile",
+          action: `relay.${job.action}.orphaned`,
+          ...(dealId !== null ? { dealId } : {}),
+          details: { txHash },
+        });
+        outcomes.push({ key: job.idempotencyKey, txHash, status: "orphaned", reason: "receipt-disappeared" });
+      } else {
+        outcomes.push({ key: job.idempotencyKey, txHash, status: "pending", reason: "no-receipt" });
+      }
       continue;
     }
-    const finalStatus = receipt.status ? "confirmed" : "reverted";
-    const reason = receipt.status ? "receipt-success" : "receipt-reverted";
-    const result = { ...(job.result ?? {}), reason, blockNumber: receipt.blockNumber.toString() };
+    const finalStatus: ReconcileStatus = receipt.status ? await receiptFinality(reader, receipt) : "reverted";
+    const reason = receipt.status ? `receipt-${finalStatus}` : "receipt-reverted";
+    const result = {
+      ...(job.result ?? {}),
+      reason,
+      blockNumber: receipt.blockNumber.toString(),
+      blockLinkedAt: new Date().toISOString(),
+    };
     await store.finishRelay(job.idempotencyKey, finalStatus, txHash, result);
     const dealId = dealIdOf(job);
     auditLog({
@@ -607,6 +945,19 @@ export async function reconcileSubmitted(
     outcomes.push({ key: job.idempotencyKey, txHash, status: finalStatus, reason });
   }
   return outcomes;
+}
+
+/**
+ * Recovery snapshot: every non-terminal relay status discoverable through the
+ * mandatory `listRelayByStatus` query. Used by health/ops surfaces so recovery
+ * work is never silently hidden when a capability probe is absent.
+ */
+export async function relayRecoverySnapshot(store: Store): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  for (const status of ["queued", "processing", "submitted", "unresolved", "failed"]) {
+    counts[status] = (await store.listRelayByStatus(status, RECONCILE_LIMIT)).length;
+  }
+  return counts;
 }
 
 // ---- Module-level shared budget (spend reporting + live enforcement) ----

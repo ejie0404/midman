@@ -30,6 +30,7 @@ import {
   loadViem,
   policyContentHash,
 } from './policy-hash.mjs';
+import { EXPECTED_GOVERNANCE, EXPECTED_HUB_TIERS, POLICY_VALUE_KINDS, policyValueMatches, tiersMatch } from './verify-deployment.mjs';
 
 export const BASE_CHAIN_ID = 8453;
 export const BASE_CHAIN_NAME = 'base';
@@ -46,6 +47,7 @@ const REQUIRED_TOP_LEVEL = [
   'contracts',
   'roles',
   'policyHashes',
+  'policyValues',
   'domain',
   'bytecodeHashes',
   'dependencies',
@@ -102,6 +104,44 @@ function findNumericLeaves(value, prefix = '$') {
     }
   }
   return found;
+}
+
+/// @notice Derive the canonical on-chain policy VALUES from the reviewed
+/// deploy/policies/*.json records. These are the values DeployProd/DeployDev
+/// register and scripts/verify-deployment.mjs reads back from the registry.
+export function expectedPolicyValues(records) {
+  const byId = {};
+  for (const { id, record } of records) byId[id] = record;
+  const out = {};
+  const cat = byId['category-v1'];
+  if (cat) {
+    const instant = (cat.values.categories || []).find((entry) => entry.name === 'INSTANT_CODE');
+    if (instant) out['category-v1'] = { minInspectionSeconds: String(instant.minInspectionSeconds) };
+  }
+  const readiness = byId['readiness-v1'];
+  if (readiness) {
+    out['readiness-v1'] = { required: readiness.values.noReadinessPolicyMarker === undefined };
+  }
+  const bond = byId['bond-v1'];
+  if (bond) {
+    out['bond-v1'] = {
+      claimantBondUnits: String(bond.values.claimantBondDefaultUnits ?? bond.values.minimumBondUnits),
+      respondentBondUnits: String(bond.values.respondentBondDefaultUnits ?? bond.values.minimumBondUnits),
+    };
+  }
+  const arb = byId['arbitration-v1'];
+  if (arb) {
+    const tiers = Array.isArray(arb.values.tiers) ? arb.values.tiers : [];
+    out['arbitration-v1'] = { tiersAllowed: String((1 << tiers.length) - 1) };
+  }
+  const outage = byId['outage-v1'];
+  if (outage) {
+    out['outage-v1'] = {
+      gracePeriodSeconds: String(outage.values.gracePeriodSeconds),
+      maxIntervals: String(outage.values.maxIntervals),
+    };
+  }
+  return out;
 }
 
 export async function computeBytecodeHashes(artifactsDir = DEFAULT_ARTIFACTS_DIR, viem = loadViem()) {
@@ -245,6 +285,60 @@ export async function verifyManifest(manifestPath = DEFAULT_MANIFEST_PATH, optio
     add('policyHashes', 'unresolved', `placeholder hashes: ${unresolvedHashes.join(', ')}`);
   } else {
     add('policyHashes', 'pass', `${matched.length}/${POLICY_IDS.length} recomputed hashes match`);
+  }
+
+  // 4b. Policy VALUES: the manifest `policyValues` block must match the
+  // canonical values encoded in the reviewed policy records. This is the
+  // offline half of the value check; scripts/verify-deployment.mjs repeats it
+  // against live registry state.
+  const expectedValues = expectedPolicyValues(records);
+  const manifestValues = (manifest && manifest.policyValues) || {};
+  const valueProblems = [];
+  for (const [type, fields] of Object.entries(POLICY_VALUE_KINDS)) {
+    const expectedFields = expectedValues[type];
+    const manifestFields = manifestValues[type];
+    if (!manifestFields || typeof manifestFields !== 'object') {
+      valueProblems.push(`${type}: missing from manifest policyValues`);
+      continue;
+    }
+    for (const [key, kind] of Object.entries(fields)) {
+      const expected = expectedFields ? expectedFields[key] : undefined;
+      if (expected === undefined) continue;
+      if (!policyValueMatches(kind, manifestFields[key], expected)) {
+        valueProblems.push(`${type}.${key}: manifest=${manifestFields[key]} expected=${expected}`);
+      }
+    }
+  }
+  if (valueProblems.length > 0) {
+    add('policyValues', 'fail', valueProblems.join('; '));
+  } else if (Object.keys(expectedValues).length === 0) {
+    add('policyValues', 'unresolved', 'no policy records available to reconcile');
+  } else {
+    add('policyValues', 'pass', `${Object.keys(expectedValues).length} policy value sets match the records`);
+  }
+
+  // 4c. Hub tier table + governance delays are frozen constants; the manifest
+  // copy must not drift from them.
+  const hubTiers = manifest && manifest.hubTiers;
+  if (!hubTiers) {
+    add('hubTiers', 'unresolved', 'manifest has no hubTiers block');
+  } else {
+    add('hubTiers', tiersMatch(hubTiers) ? 'pass' : 'fail', tiersMatch(hubTiers) ? 'canonical tier table' : 'hubTiers differ from canonical table');
+  }
+  const governance = (manifest && manifest.governance) || {};
+  const govProblems = [];
+  for (const [key, expected] of Object.entries(EXPECTED_GOVERNANCE)) {
+    if (key === 'minPanelSizes') continue; // panel floors checked via panel arrays below
+    if (String(governance[key]) !== String(expected)) {
+      govProblems.push(`${key}: manifest=${governance[key]} expected=${expected}`);
+    }
+  }
+  if (govProblems.length > 0) {
+    add('governance', 'fail', govProblems.join('; '));
+  } else if (Object.keys(governance).length === 0) {
+    add('governance', 'unresolved', 'manifest has no governance block');
+  } else {
+    add('governance', 'pass', 'governance delays match canonical constants');
   }
 
   // 5. EIP-712 domain name + version.

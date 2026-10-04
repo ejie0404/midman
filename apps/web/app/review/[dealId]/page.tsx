@@ -192,7 +192,27 @@ export default function ReviewCasePage({ params }: { params: Promise<{ dealId: s
         throw new Error(`Award exceeds principal (${formatUSDC(principalUnits)}). Awards are bounded to [0, P].`);
       }
       if (!commitment) throw new Error("Pick an evidence commitment from the manifest.");
-      const result = await postAwardDraft(dealId, { sellerAwardUnits, evidenceCommitment: commitment }, auth);
+      const result = await postAwardDraft(
+        dealId,
+        {
+          sellerAwardUnits,
+          evidenceCommitment: commitment,
+          principalUnits,
+          quotedFeeUnits,
+          buyerFeeBps,
+          claimantBondUnits: claimantBond,
+          respondentBondUnits: respondentBond,
+          origin: isFallback ? 1 : 0,
+          rulingNonce: randomBytes32(),
+          authEpoch: deal["authEpoch"] ?? "0",
+          queueExpiry: deal["queueExpiry"] ?? String(Math.floor(Date.now() / 1_000) + 86_400),
+          arbitrationPolicyId: deal["arbitrationPolicyId"] ?? dealId,
+          agreementDigest: deal["termsHash"] ?? deal["agreementDigest"] ?? dealId,
+          chainId: Number(deal["chainId"] ?? CHAIN_ID),
+          hub: deal["hub"] ?? HUB_ADDRESS,
+        },
+        auth,
+      );
       setDraft(result);
       setNotice(`Award drafted (nonce ${shortHash(result.rulingNonce)}). Review the typed-data, then sign-and-submit below.`);
     } catch (e) {
@@ -243,7 +263,11 @@ export default function ReviewCasePage({ params }: { params: Promise<{ dealId: s
             message: m as never,
           } as never) as string;
         })();
-      const result = await postApproval(dealId, { signer: account, signature, rulingDigest: digest }, auth);
+      const result = await postApproval(
+        dealId,
+        { signer: account, signature, rulingDigest: digest, epoch: deal["authEpoch"] ?? "0", origin: isFallback ? 1 : 0 },
+        auth,
+      );
       setNotice(`Approval recorded: ${result.have}/${result.need}${result.complete ? " — quorum complete, queue the ruling." : "."}`);
       await load(auth);
     } catch (e) {
@@ -259,9 +283,9 @@ export default function ReviewCasePage({ params }: { params: Promise<{ dealId: s
     setNotice(null);
     setFailure(null);
     try {
-      const awardId = draft?.award.id ?? bundle.awards[0]?.id;
-      if (!awardId) throw new Error("Draft an award first — there is nothing to queue.");
-      const result = await postQueueRuling(dealId, awardId, auth);
+      const rulingDigestForQueue = draft?.award.id ?? bundle.awards[0]?.id;
+      if (!rulingDigestForQueue) throw new Error("Draft an award first — there is nothing to queue.");
+      const result = await postQueueRuling(dealId, rulingDigestForQueue, auth);
       if (direct) {
         const hub = ((deal["hub"] ?? HUB_ADDRESS) as string) as `0x${string}`;
         const hash = await sendDirect(hub, result.calldata as `0x${string}`);
@@ -327,7 +351,7 @@ export default function ReviewCasePage({ params }: { params: Promise<{ dealId: s
       const digest =
         rulingDigest ?? (bundle?.awards[0] as unknown as { rulingDigest?: string } | undefined)?.rulingDigest;
       if (!digest) throw new Error("No ruling digest — cannot veto.");
-      const result = await postVeto(dealId, { rulingDigest: digest, vsigs }, auth);
+      const result = await postVeto(dealId, { rulingDigest: digest, vsigs, origin: isFallback ? 1 : 0 }, auth);
       if (direct) {
         const hub = ((deal["hub"] ?? HUB_ADDRESS) as string) as `0x${string}`;
         const hash = await sendDirect(hub, result.calldata as `0x${string}`);

@@ -31,6 +31,7 @@
 //     Claimed, FundingPaused, ...)
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
@@ -212,6 +213,14 @@ function countBy(abi, type) {
   return abi.filter((e) => e.type === type).length;
 }
 
+// Deterministic content hash of the ABI array. Used instead of a wall-clock
+// timestamp so re-running the exporter on unchanged artifacts produces a
+// byte-identical file: `git diff --exit-code` is then a meaningful ABI-drift
+// gate in CI (a contract change without a re-export fails the job).
+function abiHash(abi) {
+  return createHash('sha256').update(JSON.stringify(abi)).digest('hex');
+}
+
 function tsModule(contract, constName, artifactRel, abi) {
   // Precise `as const` (NOT `: Abi`): downstream readers rely on viem's
   // narrow-ABI inference (e.g. decodeEventLog eventName narrowing), exactly
@@ -238,7 +247,6 @@ async function main() {
   assertHubShape(hubAbi);
   assertPoliciesShape(policiesAbi);
 
-  const generatedAt = new Date().toISOString();
   const hubSolc = solcVersion(hub, HUB_ARTIFACT);
   const policiesSolc = solcVersion(policies, POLICIES_ARTIFACT);
 
@@ -251,7 +259,7 @@ async function main() {
     artifact: HUB_ARTIFACT,
     libraryArtifact: DISPUTE_LIB_ARTIFACT,
     solc: hubSolc,
-    generatedAt,
+    abiHash: abiHash(hubAbi),
     abi: hubAbi,
   };
   const policiesEnvelope = {
@@ -259,7 +267,7 @@ async function main() {
     source: 'forge-artifact',
     artifact: POLICIES_ARTIFACT,
     solc: policiesSolc,
-    generatedAt,
+    abiHash: abiHash(policiesAbi),
     abi: policiesAbi,
   };
 

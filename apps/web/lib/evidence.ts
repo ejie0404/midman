@@ -5,6 +5,13 @@
 //   `${METHOD}\n${path}\n${sha256hex(bodyBytes)}\n${expiry}`
 // (body = raw request bytes; GET/DELETE sign the empty hash).
 //
+// Uploads additionally bind the FILE CONTENT: the signature is the 5-line
+// form `${METHOD}\n${path}\n${sha256hex('')}\n${contentSha256}\n${expiry}`
+// (multipart boundaries are not canonical, so the body hash is the empty
+// hash) and the exact `x-content-sha256` header carries sha256 of the file
+// bytes. The server recomputes it over the received bytes and rejects a
+// mismatch, so a signature cannot be replayed against different content.
+//
 // Defensive posture: the API routes may not be deployed yet (parallel workers
 // own apps/api). Every helper throws ApiError carrying the HTTP status so UI
 // can fall back gracefully on 404/501/503 and show "reviewer access pending"
@@ -453,12 +460,30 @@ async function requestSigned<T>(args: {
   /** Bytes covered by the signature. Defaults to rawBody. Multipart uploads
    * must sign the EMPTY body (server rule: boundaries are not canonical). */
   readonly signBody?: Uint8Array | undefined;
+  /** sha256 (lowercase hex) of the file content; binds an upload to its bytes. */
+  readonly contentSha256?: string | undefined;
   readonly contentType?: string | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
 }): Promise<T> {
   const fetchImpl = args.fetchImpl ?? fetch;
-  const signed = await signRequest(args.auth, args.method, args.path, args.signBody ?? args.rawBody);
-  const headers: Record<string, string> = { ...signed.headers };
+  let headers: Record<string, string>;
+  if (args.contentSha256 !== undefined) {
+    // Content-bound upload signature (5-line). Multipart bodies are not
+    // canonical, so the body hash is the empty-string hash.
+    const expiry = Math.floor(Date.now() / 1_000) + 300;
+    const bodyHash = await sha256hex(args.signBody ?? args.rawBody ?? new Uint8Array(0));
+    const message = `${args.method.toUpperCase()}\n${args.path}\n${bodyHash}\n${args.contentSha256}\n${expiry}`;
+    const signature = await args.auth.signMessage(message);
+    headers = {
+      "x-wallet-address": args.auth.address,
+      "x-wallet-expiry": String(expiry),
+      "x-wallet-signature": signature,
+      "x-content-sha256": args.contentSha256,
+    };
+  } else {
+    const signed = await signRequest(args.auth, args.method, args.path, args.signBody ?? args.rawBody);
+    headers = { ...signed.headers };
+  }
   if (args.contentType !== undefined) headers["content-type"] = args.contentType;
   const init: RequestInit = { method: args.method.toUpperCase(), headers };
   if (args.rawBody !== undefined) init.body = args.rawBody as BodyInit;
@@ -558,12 +583,14 @@ export async function uploadEvidence(
     fileField: "file",
     file: { name: input.fileName, contentType: input.contentType, bytes: input.fileBytes },
   });
+  const contentSha256 = await sha256hex(input.fileBytes);
   return requestSigned<UploadEvidenceResult>({
     auth,
     method: "POST",
     path: `/deals/${encodeURIComponent(dealId)}/evidence`,
     rawBody: encoded.body,
     signBody: new Uint8Array(0),
+    contentSha256,
     contentType: encoded.contentType,
     fetchImpl,
   });

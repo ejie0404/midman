@@ -34,11 +34,25 @@ export interface ContinuityCheck {
 export { listKnownDealIds } from "@midman/store";
 
 export class Indexer {
+  // In-process single-flight: ticks and replays never overlap, so two timer
+  // passes cannot scan the same range or interleave cursor updates. (Cross-
+  // process serialization still needs a DB advisory lock — see the worker.)
+  private chain: Promise<unknown> = Promise.resolve();
+
   constructor(
     private readonly reader: ChainReader,
     private readonly store: Store,
     private readonly config: IndexerConfig,
   ) {}
+
+  private serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.chain.then(fn, fn);
+    this.chain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
 
   /**
    * Verify the stored tip is still on the canonical chain before scanning.
@@ -54,9 +68,17 @@ export class Indexer {
     const head = await this.reader.getLatestBlockNumber();
 
     // (a) Stored hash at the tip height must still be the chain hash there.
-    const chainTip = await this.reader.getBlock(tip.blockNumber);
+    // An unreadable tip (e.g. a backward-moving head past our block) is treated
+    // as a reorg rather than an exception.
+    let chainTip: { hash: string } | null = null;
+    try {
+      chainTip = await this.reader.getBlock(tip.blockNumber);
+    } catch {
+      chainTip = null;
+    }
     const recorded = await this.store.blockHashAt(hub, tip.blockNumber);
     const canonical =
+      chainTip !== null &&
       chainTip.hash.toLowerCase() === tip.blockHash.toLowerCase() &&
       (recorded === null || recorded.toLowerCase() === tip.blockHash.toLowerCase());
 
@@ -65,9 +87,13 @@ export class Indexer {
     // an already-scanned block that is not the tip.
     let linked = true;
     if (tip.blockNumber + 1n <= head) {
-      const successor = await this.reader.getBlock(tip.blockNumber + 1n);
-      const expectedParent = recorded ?? tip.blockHash;
-      linked = successor.parentHash.toLowerCase() === expectedParent.toLowerCase();
+      try {
+        const successor = await this.reader.getBlock(tip.blockNumber + 1n);
+        const expectedParent = recorded ?? tip.blockHash;
+        linked = successor.parentHash.toLowerCase() === expectedParent.toLowerCase();
+      } catch {
+        linked = false;
+      }
     }
 
     if (canonical && linked) return { ok: true, forkPoint: null, orphaned: 0 };
@@ -80,8 +106,12 @@ export class Indexer {
     return { ok: false, forkPoint, orphaned };
   }
 
-  /** Scan one batch forward. Returns what happened for operations visibility. */
-  async tick(): Promise<{ scannedTo: bigint; added: number; orphaned: number; reorg: boolean }> {
+  /** Scan one batch forward (serialized). Returns operations visibility. */
+  tick(): Promise<{ scannedTo: bigint; added: number; orphaned: number; reorg: boolean }> {
+    return this.serialize(() => this.tickInner());
+  }
+
+  private async tickInner(): Promise<{ scannedTo: bigint; added: number; orphaned: number; reorg: boolean }> {
     const hub = this.config.hub;
     // Immediate reorg detection: never trust the stored tip. A same-height
     // replacement is caught even when head === the old tip.
@@ -131,15 +161,23 @@ export class Indexer {
           orphaned: false,
         });
       }
-      added = await this.store.putEvents(rows); // idempotent on (txHash, logIndex)
       const tipBlock = await this.reader.getBlock(end);
-      await this.store.setTip(hub, { blockNumber: end, blockHash: tipBlock.hash });
+      // Commit events + cursor together: a crash cannot leave the projection
+      // ahead of (or behind) its tip.
+      await this.store.withTransaction(async (tx) => {
+        added = await tx.putEvents(rows); // idempotent on (txHash, logIndex)
+        await tx.setTip(hub, { blockNumber: end, blockHash: tipBlock.hash });
+      });
     }
     return { scannedTo: end >= start ? end : start - 1n, added, orphaned, reorg };
   }
 
-  /** Full replay from the deployment block (or a chosen block). */
-  async replay(fromBlock?: bigint): Promise<void> {
+  /** Full replay from the deployment block (or a chosen block); serialized. */
+  replay(fromBlock?: bigint): Promise<void> {
+    return this.serialize(() => this.replayInner(fromBlock));
+  }
+
+  private async replayInner(fromBlock?: bigint): Promise<void> {
     await this.store.clearContractData(this.config.hub);
     // Prime the tip just before the rescan start so tick() continues naturally.
     const start = fromBlock ?? this.config.fromBlock;
@@ -161,8 +199,13 @@ export class Indexer {
     let number = tipNumber;
     for (let i = 0; i < limit && number >= this.config.fromBlock; i++) {
       const recorded = await this.store.blockHashAt(hub, number);
-      const chain = await this.reader.getBlock(number);
-      if (recorded !== null && chain.hash.toLowerCase() === recorded.toLowerCase()) return number;
+      try {
+        const chain = await this.reader.getBlock(number);
+        if (recorded !== null && chain.hash.toLowerCase() === recorded.toLowerCase()) return number;
+      } catch {
+        // Unreadable height (backward-moving head): nothing recorded here can
+        // be proven canonical, so keep walking down.
+      }
       number -= 1n;
     }
     // No common anchor within the walk limit (or before deployment):

@@ -403,6 +403,7 @@ describe("reviewer service (Phase 9)", () => {
       seller: seller.address,
       chainId: CHAIN_ID,
       hub: HUB,
+      settlementNonce: "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
     };
     const tooBig = await call(app, buyer, "POST", `/deals/${DEAL}/settlement-proposals`, {
       ...base,

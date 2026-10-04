@@ -6,6 +6,18 @@ the release"). It ties together the review dossier, the reporting program, the
 deployment runbook and the go/no-go checklist. It makes no claim that an audit
 has been completed or that a mainnet deployment exists.
 
+## 0. Deliverable status (do not conflate)
+
+| Layer | State | Evidence |
+|---|---|---|
+| **Implemented** | YES | Contracts, apps, scripts, policy records, deploy scripts, CI on this checkout |
+| **Verified** | YES (this checkout) | `node scripts/verify-release.mjs` — spec model (567,700 cases), node suites (603 pass / 1 skip), script suites (87 pass), `forge test` (243 pass / 4 fork-skip), Foundry e2e + adversarial, anvil e2e |
+| **Externally reviewed** | **NO** | Independent third-party report not yet obtained (§1–§2) |
+| **Deployed** | **NO** | No Base mainnet addresses, roles, bytecode hashes or domain are instantiated |
+
+A green `verify-release` run proves **verified** only. The review and deployment
+gates below are independent and remain open.
+
 Companion documents:
 
 - Audit-readiness dossier: `docs/security-review-package.md`
@@ -93,11 +105,14 @@ triaged):
 |---|---|
 | Reviewed release commit (pinned) | to be recorded on freeze |
 | Dependency lock + toolchain pins | `pnpm-lock.yaml`, `packages/contracts/foundry.toml` |
-| Verified source/bytecode | Basescan verification via `Deploy.s.sol` `--verify` |
+| Verified source/bytecode | Basescan verification via `DeployProd.s.sol` `--verify` |
 | Deployment manifest | `deploy/manifest*.json` + verified run in `docs/phase12-manifest.md` |
-| Strict manifest verifier | `scripts/verify-manifest.mjs --strict` (with `scripts/policy-hash.mjs`, `deploy/policies/*.json`) |
+| Strict manifest verifier | `scripts/verify-manifest.mjs --strict` (with `scripts/policy-hash.mjs`, `deploy/policies/*.json`; checks `policyValues`/`governance`/`hubTiers` against the records) |
 | Deployment + verification runbook | `deploy/DEPLOYMENT.md` |
-| Policy records (8 IDs + content hashes) | registered by `Deploy.s.sol`; recorded in manifest |
+| Live deployment verifier | `scripts/verify-deployment.mjs` — checks policy VALUES, governance/panel completeness, pinned `HubDispute` linkage and (advisory) pre-link hub hash |
+| Mandatory release gate | `scripts/verify-release.mjs` (`--optional` for local) — fails if any required suite/tool is unavailable |
+| ABI drift gate | `node scripts/export-abi.mjs` + `git diff --exit-code -- packages/chain/src/abi/generated` in CI |
+| Policy records (8 IDs + content hashes + registered values) | registered by `DeployProd.s.sol`; recorded in the manifest |
 | Role assignment + handover record | governance timelock/multisig, pauser, admission, treasury, panels |
 | Emergency controls + recovery package | `docs/incident-runbooks.md`, `packages/chain/src/recovery.ts`, `apps/web/public/emergency.html` |
 | Monitoring/alert destinations | `ALERT_WEBHOOK_URL` + `apps/worker` monitoring |

@@ -126,7 +126,7 @@ describe('export-abi envelopes', () => {
       assert.equal(envelope.contract, contract);
       assert.equal(envelope.source, 'forge-artifact');
       assert.match(envelope.solc, /^0\.8\.26/);
-      assert.ok(!Number.isNaN(Date.parse(envelope.generatedAt)), 'generatedAt must be ISO time');
+      assert.match(envelope.abiHash, /^[0-9a-f]{64}$/, 'abiHash must be a deterministic content hash');
       assert.ok(Array.isArray(envelope.abi) && envelope.abi.length > 0);
     }
   });

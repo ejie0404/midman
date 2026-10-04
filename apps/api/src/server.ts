@@ -1,11 +1,14 @@
 import { pathToFileURL } from "node:url";
 import Fastify from "fastify";
-import { closeStore, createRegistry, hasKvStore, migrateStore } from "@midman/store";
+import { closeStore, createRegistry, hasAuthStateStore, hasKvStore, migrateStore } from "@midman/store";
 import { loadConfig } from "./config.js";
 import { createStoreFromEnv, type Store } from "./db.js";
 import { buildDeps, registerRoutes } from "./routes.js";
+import { registerDealMetaRoutes } from "./dealsMeta.js";
 import { registerEvidenceRoutes } from "./evidence/routes.js";
 import { registerAuthGuards, registerAuthRoutes } from "./auth/middleware.js";
+import { createStoreAuthPersistence, setAuthPersistence } from "./auth/persistence.js";
+import { hydrateSessionRevocations } from "./auth/session.js";
 import {
   registerCategoryRoutes,
   registerMessageRoutes,
@@ -74,6 +77,7 @@ export function buildServer(options: ServerOptions = {}) {
   if (enforceAuth) registerAuthGuards(app, deps);
 
   registerRoutes(app, deps);
+  registerDealMetaRoutes(app);
   registerEvidenceRoutes(app, deps);
   registerCategoryRoutes(app, deps);
   registerMessageRoutes(app, deps);
@@ -104,9 +108,17 @@ export async function buildServerAsync(options: ServerOptions = {}) {
     options.runMigrations ?? (config.databaseUrl !== null && process.env["MIDMAN_RUN_MIGRATIONS"] !== "0");
   let migrationsApplied: string[] = [];
   if (runMigrations) migrationsApplied = await migrateStore(store);
+  // Durable auth state (challenges, nonces, session revocations, invitations)
+  // when a kv-capable store is configured; in-memory otherwise.
+  let durableAuth = false;
+  if (hasAuthStateStore(store)) {
+    setAuthPersistence(createStoreAuthPersistence(store));
+    await hydrateSessionRevocations();
+    durableAuth = true;
+  }
   const durableRegistries = await configureDurableRegistries(store);
   const app = buildServer({ ...options, store });
-  return { app, config, store, durableRegistries, migrationsApplied };
+  return { app, config, store, durableRegistries, durableAuth, migrationsApplied };
 }
 
 /** Graceful shutdown: close HTTP then release the pool exactly once. */

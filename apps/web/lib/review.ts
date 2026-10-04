@@ -28,8 +28,24 @@ import {
   FALLBACK_REVIEW_SECONDS,
   CATASTROPHIC_ESCAPE_SECONDS,
 } from "@midman/shared";
+import {
+  ApiValidationError,
+  requireSettlementNonce,
+  validateApprovalProgress,
+  validateAwardDraft,
+  validateEscalationInfo as validateServerEscalation,
+  validateReviewCaseBundle as validateServerReviewCaseBundle,
+  validateReviewQueue as validateServerReviewQueue,
+  validateSettlementProposal,
+  validateSettlementProposalsList as validateServerProposalsList,
+  type AwardDraft as ServerAwardDraft,
+  type ReviewCaseBundle as ServerReviewCaseBundle,
+  type ReviewQueueItem as ServerReviewQueueItem,
+  type SettlementProposal as ServerSettlementProposal,
+} from "@midman/api-client";
 
 export { countdownTo };
+export { ApiValidationError };
 
 // ---- Endpoint-missing / access-denied helpers + shared copy ----
 
@@ -180,10 +196,100 @@ export interface EscalationInfo {
   readonly escalationEndUnix: number;
 }
 
+// ---- Server-shape -> UI view adapters ----
+//
+// The API worker owns the routes; @midman/api-client is the SINGLE validated
+// definition of every server shape. Each fetch below validates the raw payload
+// against those shared validators FIRST (schema mismatch throws
+// ApiValidationError and surfaces a visible error — never an empty list), then
+// adapts the validated resource to the workspace view model. Function names
+// stay stable for the pages.
+
+function chainRecord(chain: ServerReviewCaseBundle["chain"]): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (chain) {
+    for (const [key, value] of Object.entries(chain)) out[key] = value === null ? "" : String(value);
+  }
+  return out;
+}
+
+/** Adapt a validated server case bundle to the workspace view model. */
+export function adaptServerCaseBundle(server: ServerReviewCaseBundle): ReviewCaseBundle {
+  const deal = chainRecord(server.chain);
+  if (!deal["dealId"]) deal["dealId"] = server.dealId;
+  const manifest: EvidenceManifestRef[] = server.evidence.entries.map((entry) => ({
+    seq: entry.seq,
+    fileHash: entry.fileHash,
+    prevHash: entry.prevHash,
+    kind: entry.kind,
+    uploader: entry.uploader,
+    uploadedAt: entry.at,
+  }));
+  const latest = server.approvals.length > 0 ? server.approvals[server.approvals.length - 1]! : null;
+  const signers: ApprovalSignerEntry[] = (latest?.signers ?? []).map((signer) => ({ signer, signature: "" }));
+  const need = latest?.need ?? server.quorumNeed;
+  const awards: AwardRecord[] = server.drafts.map((draft) => ({
+    id: draft.rulingDigest,
+    sellerAwardUnits: draft.sellerAward,
+    buyerCostUnits: draft.buyerCost,
+    sellerCostUnits: draft.sellerCost,
+    evidenceCommitment: draft.evidenceCommitment,
+    rulingNonce: draft.rulingNonce,
+    authEpoch: draft.authEpoch,
+    queueExpiry: draft.queueExpiry,
+  }));
+  return {
+    deal,
+    evidence: { manifest, head: server.evidence.head },
+    deliveryForm: server.deliveryForm ?? null,
+    recusals: server.recusals.map((recusal) => ({ reviewer: recusal.reviewer, reason: recusal.reason })),
+    awards,
+    approvals: { need, signers },
+    quorum: { primary: server.quorumNeed, fallback: server.quorumNeed, tier: 0 },
+  };
+}
+
+/** Adapt a validated server queue item to the workspace view model. */
+export function adaptServerQueueItem(item: ServerReviewQueueItem): ReviewQueueItem {
+  const evidenceSeconds = item.deadlines.secondsToEvidenceEnd;
+  const deadlineUnix =
+    evidenceSeconds !== null
+      ? Math.floor(Date.now() / 1_000) + evidenceSeconds
+      : item.deadlines.evidenceEnd !== null && /^\d+$/.test(item.deadlines.evidenceEnd)
+        ? Number(item.deadlines.evidenceEnd)
+        : 0;
+  const panel: ReviewPanel =
+    item.phase === "FALLBACK_REVIEW" || item.phase === "RULING_PENDING" ? "fallback" : "primary";
+  return {
+    dealId: item.dealId,
+    phase: item.phase,
+    stage: item.stage,
+    deadlineUnix,
+    panel,
+    assigned: false,
+    assignees: [...item.primaryEligible, ...item.fallbackEligible],
+  };
+}
+
+/** Adapt a validated server settlement proposal to the workspace view model. */
+export function adaptServerProposal(proposal: ServerSettlementProposal): SettlementProposal {
+  return {
+    id: proposal.id,
+    dealId: proposal.dealId,
+    sellerAwardUnits: proposal.sellerAward,
+    buyerCostUnits: proposal.buyerCost,
+    sellerCostUnits: proposal.sellerCost,
+    expectedPhase: proposal.expectedPhase,
+    proposer: proposal.proposer,
+    settlementNonce: proposal.settlementNonce,
+    expiresAt: proposal.expiresAt,
+    status: proposal.status,
+  };
+}
+
 /**
- * Defensive shape guard for the case bundle: the API worker owns the route,
- * so the workspace refuses to render totals from an unrecognized payload
- * instead of misreading it.
+ * Shape guard for the ADAPTED case bundle (already validated from the server).
+ * Kept as defense-in-depth for the workspace render path.
  */
 export function isReviewCaseBundle(value: unknown): value is ReviewCaseBundle {
   if (!value || typeof value !== "object") return false;
@@ -291,32 +397,34 @@ export function isAssignedToMe(item: ReviewQueueItem, address: string | null | u
 
 // ---- Endpoint wrappers (exactly per contract) ----
 
-/** GET /review/queue — signed. Tolerate 404/503 via isReviewMissing. */
+/** GET /review/queue — signed. Validates the shared server shape, then adapts. */
 export async function fetchReviewQueue(
   auth: RequestSigner,
   fetchImpl?: typeof fetch,
 ): Promise<readonly ReviewQueueItem[]> {
-  const payload = await signedJson<readonly unknown[] | { queue: readonly unknown[] }>({
+  const payload = await signedJson<unknown>({
     auth,
     method: "GET",
     path: "/review/queue",
     fetchImpl,
   });
-  return normalizeList<unknown>(payload, ["queue"]).map(normalizeQueueItem);
+  const server = validateServerReviewQueue(payload, "$.queue");
+  return server.queue.map(adaptServerQueueItem);
 }
 
-/** GET /review/cases/:dealId — signed. */
-export function fetchReviewCase(
+/** GET /review/cases/:dealId — signed. Validates the shared server shape, then adapts. */
+export async function fetchReviewCase(
   dealId: string,
   auth: RequestSigner,
   fetchImpl?: typeof fetch,
 ): Promise<ReviewCaseBundle> {
-  return signedJson<ReviewCaseBundle>({
+  const payload = await signedJson<unknown>({
     auth,
     method: "GET",
     path: `/review/cases/${encodeURIComponent(dealId)}`,
     fetchImpl,
   });
+  return adaptServerCaseBundle(validateServerReviewCaseBundle(payload, "$.case"));
 }
 
 /** POST /review/cases/:dealId/assign {primary[], fallback[]} — signed. */
@@ -351,42 +459,112 @@ export function postRecusal(
   });
 }
 
-/** POST /review/cases/:dealId/awards/draft {sellerAwardUnits, evidenceCommitment} — signed. */
-export function postAwardDraft(
+/**
+ * POST /review/cases/:dealId/awards/draft. The current API derives bond costs
+ * from principal/claimed bonds and binds the Ruling to the agreement, so the
+ * caller must supply the verified deal fields (never blanks).
+ */
+export interface AwardDraftInput {
+  readonly sellerAwardUnits: string;
+  readonly evidenceCommitment: string;
+  readonly principalUnits: string;
+  readonly quotedFeeUnits: string;
+  readonly buyerFeeBps: number;
+  readonly claimantBondUnits: string;
+  readonly respondentBondUnits: string;
+  readonly origin: number;
+  readonly rulingNonce: string;
+  readonly authEpoch: string | number;
+  readonly queueExpiry: string | number;
+  readonly arbitrationPolicyId: string;
+  readonly agreementDigest: string;
+  readonly chainId?: number;
+  readonly hub?: string;
+}
+
+/** Adapt a validated server AwardDraft to the workspace view model. */
+export function adaptServerAwardDraft(draft: ServerAwardDraft): AwardDraftResult {
+  return {
+    award: {
+      id: draft.rulingDigest,
+      sellerAwardUnits: draft.sellerAward,
+      buyerCostUnits: draft.buyerCost,
+      sellerCostUnits: draft.sellerCost,
+      evidenceCommitment: draft.evidenceCommitment,
+      rulingNonce: draft.rulingNonce,
+      authEpoch: draft.authEpoch,
+      queueExpiry: draft.queueExpiry,
+    },
+    typedData: {
+      domain: draft.domain as unknown as Record<string, unknown>,
+      types: draft.types as unknown as Record<string, unknown>,
+      primaryType: draft.primaryType,
+      message: draft.message as unknown as Record<string, unknown>,
+    },
+    rulingNonce: draft.rulingNonce,
+  };
+}
+
+export async function postAwardDraft(
   dealId: string,
-  input: { readonly sellerAwardUnits: string; readonly evidenceCommitment: string },
+  input: AwardDraftInput,
   auth: RequestSigner,
   fetchImpl?: typeof fetch,
 ): Promise<AwardDraftResult> {
-  return signedJson<AwardDraftResult>({
+  const body: Record<string, unknown> = {
+    sellerAwardUnits: input.sellerAwardUnits,
+    evidenceCommitment: input.evidenceCommitment,
+    principalUnits: input.principalUnits,
+    quotedFeeUnits: input.quotedFeeUnits,
+    buyerFeeBps: input.buyerFeeBps,
+    claimantBondUnits: input.claimantBondUnits,
+    respondentBondUnits: input.respondentBondUnits,
+    origin: input.origin,
+    rulingNonce: input.rulingNonce,
+    authEpoch: input.authEpoch,
+    queueExpiry: input.queueExpiry,
+    arbitrationPolicyId: input.arbitrationPolicyId,
+    agreementDigest: input.agreementDigest,
+  };
+  if (input.chainId !== undefined) body["chainId"] = input.chainId;
+  if (input.hub !== undefined) body["hub"] = input.hub;
+  const payload = await signedJson<unknown>({
     auth,
     method: "POST",
     path: `/review/cases/${encodeURIComponent(dealId)}/awards/draft`,
-    body: { sellerAwardUnits: input.sellerAwardUnits, evidenceCommitment: input.evidenceCommitment },
+    body,
     fetchImpl,
   });
+  return adaptServerAwardDraft(validateAwardDraft(payload, "$.awardDraft"));
 }
 
-/** POST /review/cases/:dealId/approvals {signer, signature, rulingDigest} — signed. */
-export function postApproval(
+/** POST /review/cases/:dealId/approvals — the API requires epoch + origin. */
+export async function postApproval(
   dealId: string,
-  input: { readonly signer: string; readonly signature: string; readonly rulingDigest: string },
+  input: { readonly signer: string; readonly signature: string; readonly rulingDigest: string; readonly epoch: string | number; readonly origin: number },
   auth: RequestSigner,
   fetchImpl?: typeof fetch,
 ): Promise<ApprovalResult> {
-  return signedJson<ApprovalResult>({
+  const payload = await signedJson<unknown>({
     auth,
     method: "POST",
     path: `/review/cases/${encodeURIComponent(dealId)}/approvals`,
-    body: { signer: input.signer, signature: input.signature, rulingDigest: input.rulingDigest },
+    body: {
+      signer: input.signer,
+      signature: input.signature,
+      rulingDigest: input.rulingDigest,
+      epoch: input.epoch,
+      origin: input.origin,
+    },
     fetchImpl,
   });
+  return validateApprovalProgress(payload, "$.approval");
 }
 
-/** POST /review/cases/:dealId/queue-ruling {awardId} — signed. */
+/** POST /review/cases/:dealId/queue-ruling {rulingDigest} — signed. */
 export function postQueueRuling(
   dealId: string,
-  awardId: string,
+  rulingDigest: string,
   auth: RequestSigner,
   fetchImpl?: typeof fetch,
 ): Promise<QueueRulingResult> {
@@ -394,31 +572,33 @@ export function postQueueRuling(
     auth,
     method: "POST",
     path: `/review/cases/${encodeURIComponent(dealId)}/queue-ruling`,
-    body: { awardId },
+    body: { rulingDigest },
     fetchImpl,
   });
 }
 
-/** POST /review/cases/:dealId/veto {rulingDigest, vsigs[]} — signed. */
+/** POST /review/cases/:dealId/veto {rulingDigest, origin, vsigs[]} — signed. */
 export function postVeto(
   dealId: string,
-  input: { readonly rulingDigest: string; readonly vsigs: readonly VetoSigInput[] },
+  input: { readonly rulingDigest: string; readonly vsigs: readonly VetoSigInput[]; readonly origin?: number },
   auth: RequestSigner,
   fetchImpl?: typeof fetch,
 ): Promise<QueueRulingResult> {
+  const body: Record<string, unknown> = {
+    rulingDigest: input.rulingDigest,
+    vsigs: input.vsigs.map((v) => ({
+      authority: v.authority,
+      nonce: v.nonce,
+      expiry: v.expiry,
+      signature: v.signature,
+    })),
+  };
+  if (input.origin !== undefined) body["origin"] = input.origin;
   return signedJson<QueueRulingResult>({
     auth,
     method: "POST",
     path: `/review/cases/${encodeURIComponent(dealId)}/veto`,
-    body: {
-      rulingDigest: input.rulingDigest,
-      vsigs: input.vsigs.map((v) => ({
-        authority: v.authority,
-        nonce: v.nonce,
-        expiry: v.expiry,
-        signature: v.signature,
-      })),
-    },
+    body,
     fetchImpl,
   });
 }
@@ -432,45 +612,67 @@ export function relayKeyOf(payload: RelayPayload): string {
 
 // ---- Settlement proposals (signed; contract: mutualSettlement calldata) ----
 
-/** POST /deals/:dealId/settlement-proposals {sellerAwardUnits, buyerCostUnits, sellerCostUnits, expectedPhase}. */
-export function proposeSettlement(
+/**
+ * POST /deals/:dealId/settlement-proposals. `settlementNonce` is REQUIRED and
+ * must be the live on-chain value (the API now rejects an absent/random nonce
+ * and any value conflicting with chain state).
+ */
+export async function proposeSettlement(
   dealId: string,
   input: {
     readonly sellerAwardUnits: string;
     readonly buyerCostUnits: string;
     readonly sellerCostUnits: string;
     readonly expectedPhase: number;
+    readonly settlementNonce: string;
+    readonly principalUnits?: string;
+    readonly claimantBondUnits?: string;
+    readonly respondentBondUnits?: string;
+    readonly agreementDigest?: string;
+    readonly buyer?: string;
+    readonly seller?: string;
   },
   auth: RequestSigner,
   fetchImpl?: typeof fetch,
 ): Promise<SettlementProposal> {
-  return signedJson<SettlementProposal>({
+  requireSettlementNonce(input.settlementNonce);
+  const body: Record<string, unknown> = {
+    sellerAwardUnits: input.sellerAwardUnits,
+    buyerCostUnits: input.buyerCostUnits,
+    sellerCostUnits: input.sellerCostUnits,
+    expectedPhase: input.expectedPhase,
+    settlementNonce: input.settlementNonce,
+  };
+  if (input.principalUnits !== undefined) body["principalUnits"] = input.principalUnits;
+  if (input.claimantBondUnits !== undefined) body["claimantBondUnits"] = input.claimantBondUnits;
+  if (input.respondentBondUnits !== undefined) body["respondentBondUnits"] = input.respondentBondUnits;
+  if (input.agreementDigest !== undefined) body["agreementDigest"] = input.agreementDigest;
+  if (input.buyer !== undefined) body["buyer"] = input.buyer;
+  if (input.seller !== undefined) body["seller"] = input.seller;
+  const payload = await signedJson<unknown>({
     auth,
     method: "POST",
     path: `/deals/${encodeURIComponent(dealId)}/settlement-proposals`,
-    body: {
-      sellerAwardUnits: input.sellerAwardUnits,
-      buyerCostUnits: input.buyerCostUnits,
-      sellerCostUnits: input.sellerCostUnits,
-      expectedPhase: input.expectedPhase,
-    },
+    body,
     fetchImpl,
   });
+  return adaptServerProposal(validateSettlementProposal(payload, "$.settlementProposal"));
 }
 
-/** GET /deals/:dealId/settlement-proposals — signed list (bare array or {proposals}). */
+/** GET /deals/:dealId/settlement-proposals — validates the shared server shape. */
 export async function listSettlementProposals(
   dealId: string,
   auth: RequestSigner,
   fetchImpl?: typeof fetch,
 ): Promise<readonly SettlementProposal[]> {
-  const payload = await signedJson<readonly SettlementProposal[] | { proposals: readonly SettlementProposal[] }>({
+  const payload = await signedJson<unknown>({
     auth,
     method: "GET",
     path: `/deals/${encodeURIComponent(dealId)}/settlement-proposals`,
     fetchImpl,
   });
-  return normalizeList<SettlementProposal>(payload, ["proposals"]);
+  const list = validateServerProposalsList(payload, "$.proposals");
+  return list.proposals.map(adaptServerProposal);
 }
 
 /** POST /settlement-proposals/:id/accept {signature} — signed countersignature. */
@@ -492,8 +694,8 @@ export function acceptSettlementProposal(
 // ---- Escalation info (auth optional: signed when a wallet is connected) ----
 
 /**
- * GET /deals/:dealId/escalation -> {claimantBondUnits, respondentBondUnits,
- * estimated, negotiationEndUnix, escalationEndUnix}. Unsigned fallback is used
+ * GET /deals/:dealId/escalation. Validates the shared server shape, then
+ * adapts to the workspace's bond/window view model. Unsigned fallback is used
  * when no wallet is connected (DisputeProgress); signed when provided.
  */
 export async function fetchEscalation(
@@ -504,8 +706,8 @@ export async function fetchEscalation(
   const path = `/deals/${encodeURIComponent(dealId)}/escalation`;
   const impl = fetchImpl ?? fetch;
   if (auth) {
-    const payload = await signedJson<Record<string, unknown>>({ auth, method: "GET", path, fetchImpl: impl });
-    return normalizeEscalation(payload);
+    const payload = await signedJson<unknown>({ auth, method: "GET", path, fetchImpl: impl });
+    return adaptServerEscalation(validateServerEscalation(payload, "$.escalation"));
   }
   let res: Response;
   try {
@@ -515,7 +717,25 @@ export async function fetchEscalation(
   }
   const text = await res.text();
   if (!res.ok) throw new ApiError(res.status, extractMessage(text));
-  return normalizeEscalation((text ? JSON.parse(text) : {}) as Record<string, unknown>);
+  return adaptServerEscalation(
+    validateServerEscalation((text ? JSON.parse(text) : {}) as unknown, "$.escalation"),
+  );
+}
+
+/** Adapt a validated server escalation payload to the workspace view model. */
+export function adaptServerEscalation(server: {
+  readonly claimantBond: string;
+  readonly respondentBond: string;
+  readonly estimated: boolean;
+  readonly windows: { readonly selfResolutionEnd: string | null; readonly escalationEnd: string | null };
+}): EscalationInfo {
+  return {
+    claimantBondUnits: server.claimantBond,
+    respondentBondUnits: server.respondentBond,
+    estimated: server.estimated,
+    negotiationEndUnix: server.windows.selfResolutionEnd !== null ? Number(server.windows.selfResolutionEnd) : 0,
+    escalationEndUnix: server.windows.escalationEnd !== null ? Number(server.windows.escalationEnd) : 0,
+  };
 }
 
 function normalizeEscalation(raw: Record<string, unknown>): EscalationInfo {

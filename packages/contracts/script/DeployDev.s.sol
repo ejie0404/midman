@@ -29,7 +29,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {MidmanHub} from "../src/MidmanHub.sol";
 import {MidmanPolicies} from "../src/MidmanPolicies.sol";
 import {MockUSDC, MockFeed} from "../test/Mocks.t.sol";
-import {DeployPolicyIds} from "./DeployProd.s.sol";
+import {DeployPolicyIds, DeployPolicyValues} from "./DeployProd.s.sol";
 
 /// @notice Development deployment logic, factored into an internal function so
 /// test/DeployScripts.t.sol can assert on the mocks, panels and registrations.
@@ -110,12 +110,25 @@ abstract contract DeployDevBase {
             c.governance, c.pauser, c.admissionSigner, c.treasury, address(feed), c.primary, c.fallbackPanel, c.veto
         );
         policies.registerFeePolicy(DeployPolicyIds.FEE, FEE_CONTENT);
-        policies.registerCategoryPolicy(DeployPolicyIds.CATEGORY, CATEGORY_CONTENT, 3_600);
-        policies.registerReadinessPolicy(DeployPolicyIds.READINESS, READINESS_CONTENT, false);
+        policies.registerCategoryPolicy(
+            DeployPolicyIds.CATEGORY, CATEGORY_CONTENT, DeployPolicyValues.CATEGORY_MIN_INSPECTION
+        );
+        policies.registerReadinessPolicy(
+            DeployPolicyIds.READINESS, READINESS_CONTENT, DeployPolicyValues.READINESS_REQUIRED
+        );
         policies.registerEvidencePolicy(DeployPolicyIds.EVIDENCE, EVIDENCE_CONTENT);
-        policies.registerBondPolicy(DeployPolicyIds.BOND, BOND_CONTENT, 5_000_000, 5_000_000);
-        policies.registerArbitrationPolicy(DeployPolicyIds.ARBITRATION, ARBITRATION_CONTENT, 0x07);
-        policies.registerOutagePolicy(DeployPolicyIds.OUTAGE, OUTAGE_CONTENT, 1_800, 8);
+        policies.registerBondPolicy(
+            DeployPolicyIds.BOND, BOND_CONTENT, DeployPolicyValues.BOND_CLAIMANT, DeployPolicyValues.BOND_RESPONDENT
+        );
+        policies.registerArbitrationPolicy(
+            DeployPolicyIds.ARBITRATION, ARBITRATION_CONTENT, DeployPolicyValues.ARBITRATION_TIERS_ALLOWED
+        );
+        policies.registerOutagePolicy(
+            DeployPolicyIds.OUTAGE,
+            OUTAGE_CONTENT,
+            DeployPolicyValues.OUTAGE_GRACE_SECONDS,
+            DeployPolicyValues.OUTAGE_MAX_INTERVALS
+        );
         policies.registerCatastrophicPolicy(DeployPolicyIds.CATASTROPHIC, CATASTROPHIC_CONTENT);
         MidmanHub hub = new MidmanHub(address(usdc), address(policies));
         out = DevDeployment({
@@ -175,6 +188,14 @@ contract DeployDev is Script, DeployDevBase {
         console.logBytes32(address(out.policies).codehash);
         console.log("HUB_CODEHASH:");
         console.logBytes32(address(out.hub).codehash);
+        console.log("POLICY_VALUES:");
+        console.log(string.concat("  category minInspectionSeconds=", vm.toString(uint256(DeployPolicyValues.CATEGORY_MIN_INSPECTION))));
+        console.log(string.concat("  readiness required=", DeployPolicyValues.READINESS_REQUIRED ? "true" : "false"));
+        console.log(string.concat("  bond claimant=", vm.toString(DeployPolicyValues.BOND_CLAIMANT), " respondent=", vm.toString(DeployPolicyValues.BOND_RESPONDENT)));
+        console.log(string.concat("  arbitration tiersAllowed=", vm.toString(uint256(DeployPolicyValues.ARBITRATION_TIERS_ALLOWED))));
+        console.log(string.concat("  outage grace=", vm.toString(uint256(DeployPolicyValues.OUTAGE_GRACE_SECONDS)), " maxIntervals=", vm.toString(uint256(DeployPolicyValues.OUTAGE_MAX_INTERVALS))));
+        console.log(string.concat("GOVERNANCE_ROTATION_DELAY:", vm.toString(MidmanPolicies(out.policies).ROTATION_DELAY())));
+        console.log(string.concat("GOVERNANCE_UNPAUSE_DELAY:", vm.toString(MidmanPolicies(out.policies).UNPAUSE_DELAY())));
         console.log("POLICY_IDS:");
         console.logBytes32(DeployPolicyIds.FEE);
         console.logBytes32(DeployPolicyIds.CATEGORY);

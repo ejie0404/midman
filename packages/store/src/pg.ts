@@ -477,6 +477,17 @@ export class PgStore implements Store {
     return rows.map(toRelay);
   }
 
+  async listRelayByStatus(status: string, limit: number): Promise<RelayJob[]> {
+    const { rows } = await this.db.query<RelayDbRow>(
+      `SELECT * FROM relay_outbox
+       WHERE status = $1
+       ORDER BY updated_at ASC, idempotency_key ASC
+       LIMIT $2`,
+      [status, limit],
+    );
+    return rows.map(toRelay);
+  }
+
   async recordSponsor(txHash: string, dealId: string | null, action: string): Promise<void> {
     await this.db.query(
       "INSERT INTO sponsor_ledger (tx_hash, deal_id, action) VALUES ($1, $2, $3)",

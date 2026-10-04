@@ -200,6 +200,114 @@ export class MemoryAuthPersistence implements AuthPersistence {
 
 let activeAdapter: AuthPersistence = new MemoryAuthPersistence();
 
+/**
+ * The durable store surface this adapter needs. Satisfied by @midman/store
+ * (`hasAuthStateStore`) — a scoped kv plus optional transactions.
+ */
+export interface AuthKvStore {
+  authGet(scope: string, key: string): Promise<unknown | null>;
+  authPut(scope: string, key: string, value: unknown, expiresAt?: string | null): Promise<void>;
+  authDelete(scope: string, key: string): Promise<void>;
+  authList(scope: string): Promise<Array<{ key: string; value: unknown; expiresAt?: string | null }>>;
+  withTransaction?<T>(fn: (store: AuthKvStore) => Promise<T>): Promise<T>;
+}
+
+const SCOPE = {
+  challenge: "auth.challenge",
+  revoked: "auth.session-revoked",
+  invitation: "auth.invitation",
+  auditAll: "auth.assignment-audit",
+  auditDeal: (dealId: string) => `auth.assignment-audit:${dealId.toLowerCase()}`,
+} as const;
+
+/**
+ * Durable domain adapter over the store's scoped auth kv. `redeemInvitation`
+ * and `revokeInvitation` run inside a transaction when the store supports it,
+ * making invitation redemption compare-and-set (single-use) across processes.
+ */
+export function createStoreAuthPersistence(store: AuthKvStore): AuthPersistence {
+  const read = async <T>(scope: string, key: string): Promise<T | null> =>
+    (await store.authGet(scope, key)) as T | null;
+  return {
+    async putChallenge(nonce, challenge) {
+      await store.authPut(SCOPE.challenge, nonce.toLowerCase(), challenge, new Date(challenge.expiresAt * 1000).toISOString());
+    },
+    async getChallenge(nonce) {
+      return read<PersistedChallenge>(SCOPE.challenge, nonce.toLowerCase());
+    },
+    async delConsumeChallenge(nonce) {
+      const key = nonce.toLowerCase();
+      const run = async (tx: AuthKvStore) => {
+        const record = (await tx.authGet(SCOPE.challenge, key)) as PersistedChallenge | null;
+        if (record) await tx.authDelete(SCOPE.challenge, key);
+        return record;
+      };
+      return store.withTransaction ? store.withTransaction(run) : run(store);
+    },
+    async revokeSession(nonce) {
+      await store.authPut(SCOPE.revoked, nonce, true);
+    },
+    async isRevoked(nonce) {
+      return (await store.authGet(SCOPE.revoked, nonce)) !== null;
+    },
+    async listRevokedSessions() {
+      return (await store.authList(SCOPE.revoked)).map((e) => e.key);
+    },
+    async recordInvitation(invitation) {
+      await store.authPut(SCOPE.invitation, invitation.draftId.toLowerCase(), invitation, invitation.expiresAt);
+    },
+    async getInvitation(draftId) {
+      return read<StoredInvitation>(SCOPE.invitation, draftId.toLowerCase());
+    },
+    async redeemInvitation(draftId, input) {
+      const key = draftId.toLowerCase();
+      const run = async (tx: AuthKvStore): Promise<RedeemInvitationResult> => {
+        const record = (await tx.authGet(SCOPE.invitation, key)) as StoredInvitation | null;
+        if (!record) return { ok: false, reason: "unknown" };
+        if (record.revoked) return { ok: false, reason: "revoked" };
+        if (record.consumed) return { ok: false, reason: "consumed" };
+        if (input.nowIso >= record.expiresAt) return { ok: false, reason: "expired" };
+        if (!constantTimeHexEqual(record.tokenHash, input.tokenHash)) return { ok: false, reason: "bad-token" };
+        if (
+          record.intendedCounterparty !== null &&
+          record.intendedCounterparty.toLowerCase() !== input.wallet.toLowerCase()
+        ) {
+          return { ok: false, reason: "wrong-wallet" };
+        }
+        const updated: StoredInvitation = {
+          ...record,
+          consumed: true,
+          redeemedBy: input.wallet,
+          redeemTx: input.redeemTx ?? null,
+        };
+        await tx.authPut(SCOPE.invitation, key, updated, updated.expiresAt);
+        return { ok: true, invitation: updated };
+      };
+      return store.withTransaction ? store.withTransaction(run) : run(store);
+    },
+    async revokeInvitation(draftId) {
+      const key = draftId.toLowerCase();
+      const run = async (tx: AuthKvStore) => {
+        const record = (await tx.authGet(SCOPE.invitation, key)) as StoredInvitation | null;
+        if (record) await tx.authPut(SCOPE.invitation, key, { ...record, revoked: true }, record.expiresAt);
+      };
+      await (store.withTransaction ? store.withTransaction(run) : run(store));
+    },
+    async appendAssignmentAudit(entry) {
+      const key = `${entry.at}|${randomBytes(8).toString("hex")}`;
+      await store.authPut(SCOPE.auditDeal(entry.dealId), key, entry, null);
+      await store.authPut(SCOPE.auditAll, key, entry, null);
+    },
+    async listAssignmentAudit(dealId) {
+      const scope = dealId === undefined ? SCOPE.auditAll : SCOPE.auditDeal(dealId);
+      const rows = await store.authList(scope);
+      return rows
+        .map((e) => e.value as AssignmentAuditEntry)
+        .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+    },
+  };
+}
+
 /** Install the active adapter (null restores the in-memory default). */
 export function setAuthPersistence(adapter: AuthPersistence | null): void {
   activeAdapter = adapter ?? new MemoryAuthPersistence();

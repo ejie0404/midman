@@ -8,9 +8,15 @@ import type { ChainReader } from "@midman/chain";
 import { createViemReader } from "@midman/chain";
 import { auditLog, createStore, type Store } from "@midman/store";
 import { sponsorConfigFromEnv, createRelayProcessor } from "./relay.js";
-import { RelayProcessor, reconcileSubmitted, defaultSponsorshipBudget } from "./reliability/hardening.js";
+import {
+  RelayProcessor,
+  reconcileSubmitted,
+  relayRecoverySnapshot,
+  defaultSponsorshipBudget,
+} from "./reliability/hardening.js";
 import { AbuseControls } from "./reliability/abuse.js";
 import { RpcPool } from "./reliability/rpcPool.js";
+import { WorkerIndexer } from "./indexer.js";
 import { progressionPass, escapePass } from "./progression.js";
 import { reconcile } from "./reconcile.js";
 import { remindersPass } from "./reminders.js";
@@ -53,9 +59,34 @@ export function workerEnv(): WorkerEnv {
 
 let sharedAbuse: AbuseControls | null = null;
 const processors = new WeakMap<Store, RelayProcessor>();
+const indexers = new WeakMap<Store, WorkerIndexer>();
 
 function abuseControls(): AbuseControls {
   return (sharedAbuse ??= new AbuseControls());
+}
+
+function fromBlockFromEnv(): bigint {
+  const raw = process.env["HUB_DEPLOY_BLOCK"] ?? process.env["INDEXER_FROM_BLOCK"] ?? "0";
+  try {
+    const value = BigInt(raw);
+    return value >= 0n ? value : 0n;
+  } catch {
+    return 0n;
+  }
+}
+
+/** Serialized worker indexer for a store/env (cursor survives timer ticks). */
+export function workerIndexerFor(env: WorkerEnv): WorkerIndexer | null {
+  if (!env.reader || !env.hub) return null;
+  let indexer = indexers.get(env.store);
+  if (!indexer) {
+    indexer = new WorkerIndexer(env.reader, env.store, {
+      hub: env.hub,
+      fromBlock: fromBlockFromEnv(),
+    });
+    indexers.set(env.store, indexer);
+  }
+  return indexer;
 }
 
 /**
@@ -84,7 +115,11 @@ export function relayProcessorFor(env: WorkerEnv): RelayProcessor {
   return processor;
 }
 
-/** Drain queued relay jobs once. Returns per-job outcomes. */
+/**
+ * Drain queued relay jobs once. Recovery queries are mandatory (no optional
+ * capability probes): queued work AND work left 'processing' by a crashed
+ * worker are both discovered, and expired leases are reaped first.
+ */
 export async function drainRelayOnce(
   env: WorkerEnv,
   processor?: RelayProcessor,
@@ -92,11 +127,8 @@ export async function drainRelayOnce(
   const outcomes: Array<{ key: string; status: string; reason?: string }> = [];
   if (!env.hub) return outcomes;
   const relay = processor ?? relayProcessorFor(env);
-  const lister = env.store as unknown as {
-    listRelayByStatus?: (status: string) => Promise<Array<{ idempotencyKey: string }>>;
-  };
-  const processing =
-    typeof lister.listRelayByStatus === "function" ? await lister.listRelayByStatus("processing") : [];
+  await env.store.reapExpiredRelayLeases();
+  const processing = await env.store.listRelayByStatus("processing", 25);
   const jobs = [...(await env.store.listQueuedRelay("relay", 25)), ...processing];
   const seen = new Set<string>();
   for (const job of jobs) {
@@ -112,12 +144,56 @@ export async function drainRelayOnce(
   return outcomes;
 }
 
-/** One full operations pass. Safe to run on a timer. */
+// In-process single-flight guard: timer passes never overlap. A pass that
+// arrives while one is running is dropped (counted as `overlapped`), and DB
+// leases still guard the multi-worker case.
+let passRunning = false;
+
+/** True while a worker pass is executing in this process (test/diagnostic). */
+export function workerPassInFlight(): boolean {
+  return passRunning;
+}
+
+/** One full operations pass. Safe to run on a timer; overlapping calls skip. */
 export async function runPassOnce(env: WorkerEnv, nowSeconds: number): Promise<Record<string, number>> {
   const counts: Record<string, number> = { relay: 0, progression: 0, escape: 0, reminders: 0 };
   if (!env.hub || !env.reader) {
     auditLog({ actor: "worker", action: "worker.degraded", details: { reason: "no-rpc-or-hub" } });
     return counts;
+  }
+  if (passRunning) {
+    counts["overlapped"] = 1;
+    return counts;
+  }
+  passRunning = true;
+  try {
+    return await runPassInner(env, nowSeconds, counts);
+  } finally {
+    passRunning = false;
+  }
+}
+
+async function runPassInner(
+  env: WorkerEnv,
+  nowSeconds: number,
+  counts: Record<string, number>,
+): Promise<Record<string, number>> {
+  const reader = env.reader;
+  const hub = env.hub;
+  if (!reader || !hub) return counts;
+  // Advance the chain projection first so relay reconciliation sees fresh
+  // events, serialized per deployment through the WorkerIndexer.
+  const indexer = workerIndexerFor(env);
+  if (indexer) {
+    try {
+      const tick = await indexer.tick();
+      counts["indexed"] = tick.added;
+      counts["indexOrphaned"] = tick.orphaned;
+      if (tick.reorg) counts["indexReorgs"] = 1;
+    } catch {
+      // Indexing is best-effort within a pass; a bad RPC must not abort relay.
+      counts["indexError"] = 1;
+    }
   }
   const processor = relayProcessorFor(env);
   const drained = await drainRelayOnce(env, processor);
@@ -126,15 +202,26 @@ export async function runPassOnce(env: WorkerEnv, nowSeconds: number): Promise<R
   counts["relayBudgetStopped"] = drained.filter(
     (outcome) => outcome.status === "unsigned" && outcome.reason === "budget-exhausted",
   ).length;
-  // Resolve previously submitted jobs: confirmed / reverted / still pending.
-  const reconciled = await reconcileSubmitted(env.store, env.reader, processor.submittedKeysList());
+  // Resolve previously submitted jobs: finalized / confirmed / reverted / orphaned.
+  const reconciled = await reconcileSubmitted(env.store, reader, processor.submittedKeysList());
   counts["relayReconciled"] = reconciled.filter(
-    (outcome) => outcome.status === "confirmed" || outcome.status === "reverted",
+    (outcome) =>
+      outcome.status === "finalized" ||
+      outcome.status === "confirmed" ||
+      outcome.status === "reverted" ||
+      outcome.status === "orphaned",
   ).length;
-  counts["progression"] = (await progressionPass({ store: env.store, reader: env.reader, hub: env.hub, nowSeconds })).length;
-  counts["escape"] = (await escapePass({ store: env.store, reader: env.reader, hub: env.hub, nowSeconds })).length;
-  counts["reminders"] = (await remindersPass({ store: env.store, reader: env.reader, hub: env.hub, nowSeconds })).length;
-  const reconciliation = await reconcile({ reader: env.reader, hub: env.hub, usdc: env.usdc });
+  counts["relayFinalized"] = reconciled.filter((outcome) => outcome.status === "finalized").length;
+  counts["relayOrphaned"] = reconciled.filter((outcome) => outcome.status === "orphaned").length;
+  // Recovery visibility: every non-terminal status is queried, not assumed.
+  const recovery = await relayRecoverySnapshot(env.store);
+  counts["relayProcessing"] = recovery["processing"] ?? 0;
+  counts["relaySubmitted"] = recovery["submitted"] ?? 0;
+  counts["relayFailed"] = recovery["failed"] ?? 0;
+  counts["progression"] = (await progressionPass({ store: env.store, reader, hub, nowSeconds })).length;
+  counts["escape"] = (await escapePass({ store: env.store, reader, hub, nowSeconds })).length;
+  counts["reminders"] = (await remindersPass({ store: env.store, reader, hub, nowSeconds })).length;
+  const reconciliation = await reconcile({ reader, hub, usdc: env.usdc });
   if (!reconciliation.ok) counts["alerts"] = 1;
   // Monitoring: metrics + threshold alerts (deduped, non-throwing delivery).
   const monitoring = await runMonitoringPass(env, nowSeconds, { sink: makeSinkFromEnv() });

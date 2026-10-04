@@ -282,24 +282,73 @@ describe("typed-data field order for Ruling/Veto builders", () => {
 describe("review queue wrapper (mocked fetch)", () => {
   const auth = { address: "0xabc", signMessage: async () => "0xsig" };
 
-  it("normalizes queue items and detects assignment", async () => {
+  it("validates the server queue shape and adapts it for the workspace", async () => {
     const fetchImpl = async (url, init) => {
       assert.ok(String(url).endsWith("/review/queue"));
       assert.equal(init.method, "GET");
       assert.ok(init.headers["x-wallet-signature"]);
-      return jsonResponse(200, [
-        { dealId: "0xdeal1", phase: "PRIMARY_REVIEW", stage: "review", deadlineUnix: 2000000, panel: "primary", assigned: true },
-        { dealId: "0xdeal2", phase: "EVIDENCE", stage: "evidence", deadlineUnix: "2000100", panel: "fallback", assigned: false, assignees: ["0xABC"] },
-      ]);
+      return jsonResponse(200, {
+        queue: [
+          {
+            dealId: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            source: "chain",
+            phase: "PRIMARY_REVIEW",
+            phaseIndex: 5,
+            inDispute: true,
+            stage: "PRIMARY_REVIEW",
+            deadlines: {
+              evidenceEnd: "2500000",
+              primaryEnd: "3000000",
+              fallbackEnd: "3500000",
+              escapeAt: "9000000",
+              secondsToEvidenceEnd: 100000,
+              secondsToEscape: 6000000,
+            },
+            primaryEligible: ["0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],
+            fallbackEligible: [],
+            recusals: 0,
+          },
+          {
+            dealId: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            source: "projection",
+            phase: "FALLBACK_REVIEW",
+            phaseIndex: null,
+            inDispute: null,
+            stage: "unknown",
+            deadlines: {
+              evidenceEnd: null,
+              primaryEnd: null,
+              fallbackEnd: null,
+              escapeAt: null,
+              secondsToEvidenceEnd: null,
+              secondsToEscape: null,
+            },
+            primaryEligible: [],
+            fallbackEligible: ["0xabc0000000000000000000000000000000000000"],
+            recusals: 1,
+          },
+        ],
+        filtered: "dispute phases 2-8 first",
+      });
     };
     const queue = await fetchReviewQueue(auth, fetchImpl);
     assert.equal(queue.length, 2);
     assert.equal(queue[0]?.panel, "primary");
-    assert.equal(queue[1]?.deadlineUnix, 2000100);
-    assert.equal(isAssignedToMe(queue[0], "0xabc"), true);
-    assert.equal(isAssignedToMe(queue[1], "0xabc"), true);
+    assert.equal(queue[1]?.panel, "fallback");
+    assert.ok(queue[1]?.deadlineUnix === 0);
+    assert.equal(isAssignedToMe(queue[0], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), true);
+    assert.equal(isAssignedToMe(queue[1], "0xabc0000000000000000000000000000000000000"), true);
     assert.equal(isAssignedToMe(queue[1], "0xother"), false);
     assert.equal(isAssignedToMe(queue[0], null), false);
+  });
+
+  it("throws ApiValidationError (never an empty queue) on a shape mismatch", async () => {
+    const bad = await fetchReviewQueue(auth, async () => jsonResponse(200, [{ dealId: "legacy" }])).then(
+      () => null,
+      (error) => error,
+    );
+    assert.ok(bad, "mismatched queue payload must reject");
+    assert.match(String(bad.message), /expected|queue/i);
   });
 
   it("surfaces missing-backend and denied statuses for UI fallback", async () => {

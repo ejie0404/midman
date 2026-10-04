@@ -122,6 +122,12 @@ export interface Store {
   reapExpiredRelayLeases(): Promise<number>;
   finishRelay(key: string, status: string, txHash: string | null, result: Record<string, unknown> | null): Promise<void>;
   listQueuedRelay(queue: string, limit: number): Promise<RelayJob[]>;
+  /**
+   * Mandatory recovery query: every job in a given lifecycle status (newest
+   * first). Used by the worker to discover 'processing', 'submitted',
+   * 'failed' and 'queued' work without optional capability probing.
+   */
+  listRelayByStatus(status: string, limit: number): Promise<RelayJob[]>;
   recordSponsor(txHash: string, dealId: string | null, action: string): Promise<void>;
   countSponsorsSince(sinceIso: string): Promise<number>;
   /** Transactional sponsorship reservation: advisory-locked count + insert. */
@@ -383,6 +389,12 @@ export class MemoryStore implements Store {
   }
   async listQueuedRelay(queue: string, limit: number): Promise<RelayJob[]> {
     return [...this.relay.values()].filter((j) => j.queue === queue && j.status === "queued").slice(0, limit);
+  }
+  async listRelayByStatus(status: string, limit: number): Promise<RelayJob[]> {
+    return [...this.relay.values()]
+      .filter((j) => j.status === status)
+      .slice(0, Math.max(0, limit))
+      .map((j) => ({ ...j }));
   }
   async recordSponsor(txHash: string, dealId: string | null, action: string): Promise<void> {
     this.sponsors.push({ txHash, dealId, action, at: new Date().toISOString() });

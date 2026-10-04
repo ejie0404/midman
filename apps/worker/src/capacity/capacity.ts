@@ -24,6 +24,11 @@ export interface CapacityLoad {
   readonly evidenceCount: number;
   readonly reviewerPending: number;
   readonly apiWindowQps?: number;
+  /**
+   * Probes that could not be measured. A missing probe is reported as
+   * unknown/degraded rather than silently counted as zero usage.
+   */
+  readonly probesMissing?: string[];
 }
 
 export interface CapacityLimits {
@@ -86,6 +91,12 @@ export function assess(load: CapacityLoad, limits: CapacityLimits): CapacityAsse
       state = "amber";
     }
   }
+  // Missing probes are unknown, not zero: degrade at least to amber and say so.
+  const missing = load.probesMissing ?? [];
+  if (missing.length > 0) {
+    notes.push(`degraded: unmeasured probes (${missing.join(", ")}); usage is unknown, not zero`);
+    if (state === "green") state = "amber";
+  }
   if (state === "red") notes.push(PAUSE_NOTE);
   return { state, notes };
 }
@@ -111,15 +122,25 @@ export class CapacityMeter {
 
   async measure(): Promise<CapacityLoad> {
     const openRelayJobs = (await this.deps.store.listQueuedRelay("relay", MAX_RELAY_SCAN)).length;
-    const activeEscalated = await this.countActiveEscalated();
-    const evidenceCount = this.deps.evidenceCount ? await this.deps.evidenceCount() : 0;
-    const reviewerPending = this.deps.reviewerPending ? await this.deps.reviewerPending() : 0;
+    const probesMissing: string[] = [];
+    let activeEscalated = 0;
+    if (!this.deps.reader || !this.deps.hub) {
+      probesMissing.push("activeEscalated");
+    } else {
+      activeEscalated = await this.countActiveEscalated();
+    }
+    let evidenceCount = 0;
+    if (this.deps.evidenceCount) evidenceCount = await this.deps.evidenceCount();
+    else probesMissing.push("evidenceCount");
+    let reviewerPending = 0;
+    if (this.deps.reviewerPending) reviewerPending = await this.deps.reviewerPending();
+    else probesMissing.push("reviewerPending");
     const base: CapacityLoad = { activeEscalated, openRelayJobs, evidenceCount, reviewerPending };
     if (this.deps.apiWindowQps) {
       const qps = await this.deps.apiWindowQps();
-      if (qps !== null) return { ...base, apiWindowQps: qps };
+      if (qps !== null) return { ...base, apiWindowQps: qps, probesMissing };
     }
-    return base;
+    return { ...base, probesMissing };
   }
 
   private async countActiveEscalated(): Promise<number> {
@@ -140,4 +161,57 @@ export class CapacityMeter {
     }
     return count;
   }
+}
+
+/**
+ * Durable admission context derived from chain + store (not caller-supplied):
+ * protocol-wide active-escalated count and 24h pair exposure. Missing probes
+ * (no reader/hub) are reported as degraded so admission can fail closed rather
+ * than assume zero usage.
+ */
+export async function durableAdmissionContext(input: {
+  readonly store: Pick<Store, "listDealIds" | "listChainEventDealIds" | "listQueuedRelay">;
+  readonly reader: ChainReader | null;
+  readonly hub: Address | null;
+  readonly buyer: string;
+  readonly seller: string;
+  readonly nowSeconds: number;
+}): Promise<{ activeEscalatedCount: number; pairExposure24hUnits: bigint; degraded: boolean }> {
+  const { reader, hub, nowSeconds } = input;
+  if (!reader || !hub) {
+    return { activeEscalatedCount: 0, pairExposure24hUnits: 0n, degraded: true };
+  }
+  let activeEscalatedCount = 0;
+  let pairExposure24hUnits = 0n;
+  const since = BigInt(nowSeconds) - 86_400n;
+  for (const dealId of await listKnownDealIds(input.store as unknown as Store)) {
+    let deal: Record<string, bigint | string | boolean | number>;
+    try {
+      deal = await reader.getDeal(hub, dealId as Hash);
+    } catch {
+      continue;
+    }
+    if (deal["funded"] !== true) continue;
+    if (ESCALATED_PHASES.has(Number(deal["phase"])) && Number(deal["escalatedAt"]) > 0) {
+      activeEscalatedCount += 1;
+    }
+    const buyer = String(deal["buyer"] ?? "").toLowerCase();
+    const seller = String(deal["seller"] ?? "").toLowerCase();
+    const wantBuyer = input.buyer.toLowerCase();
+    const wantSeller = input.seller.toLowerCase();
+    const pairMatches =
+      (buyer === wantBuyer && seller === wantSeller) || (buyer === wantSeller && seller === wantBuyer);
+    const fundedAt = toBigUnits(deal["fundedAt"]);
+    if (pairMatches && fundedAt >= since) {
+      pairExposure24hUnits += toBigUnits(deal["principal"]);
+    }
+  }
+  return { activeEscalatedCount, pairExposure24hUnits, degraded: false };
+}
+
+function toBigUnits(value: bigint | string | number | boolean | undefined): bigint {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? BigInt(Math.trunc(value)) : 0n;
+  if (typeof value === "string" && /^\d+$/.test(value)) return BigInt(value);
+  return 0n;
 }

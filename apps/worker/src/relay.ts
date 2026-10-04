@@ -168,9 +168,13 @@ function buildCalldata(action: string, dealId: Hash, params: Record<string, unkn
         }) as Hash;
       default:
         // fund, evidence, rulings, vetoes carry complex nested payloads;
-        // clients pre-encode and supply `data` (validated as hex here).
+        // clients pre-encode and supply `data` (legacy) or `calldata` (API).
+        // Both are accepted; the decoded function is validated downstream.
         if (typeof params["data"] === "string" && (params["data"] as string).startsWith("0x")) {
           return params["data"] as Hash;
+        }
+        if (typeof params["calldata"] === "string" && (params["calldata"] as string).startsWith("0x")) {
+          return params["calldata"] as Hash;
         }
         return null;
     }

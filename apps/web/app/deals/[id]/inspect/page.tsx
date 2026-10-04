@@ -149,6 +149,7 @@ export default function InspectPage({ params }: { params: Promise<{ id: string }
         quotedFeeUnits={view.terms.quotedFeeUnits}
         buyerFeeBps={view.terms.buyerFeeBps === "0" ? 0 : view.terms.buyerFeeBps === "10000" ? 10000 : 5000}
         phase={view.dealStatus?.phase ?? ""}
+        settlementNonce={view.dealStatus?.settlementNonce}
       />
 
       <div style={card}>
