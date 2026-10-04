@@ -5,6 +5,7 @@
 // quorum on-chain at queue time; this registry is display + intake only.
 import type { Address } from "viem";
 import { DurableCollection, RegistryWriter, type RegistryAdapter } from "@midman/store";
+import { getAuthPersistence, type AssignmentAuditEntry } from "../auth/persistence.js";
 
 const CASE_NS = "review.cases";
 
@@ -177,6 +178,60 @@ export class InMemoryReviewRegistry {
 
 /** Process-wide registry used by routes (tests reset via __resetReviewRegistryForTests). */
 export const reviewRegistry = new InMemoryReviewRegistry();
+
+// ---------------------------------------------------------------------------
+// Assignment authority (Round-2, requirement 6)
+//
+// Only an explicit `arbitration` operator may change panels; the route guard
+// authenticates that role. These helpers perform the authority-independent
+// validation (address shape, disjointness, participant conflicts) and persist
+// the append-only audit trail through the AuthPersistence adapter.
+// ---------------------------------------------------------------------------
+
+export interface AssignmentValidationContext {
+  readonly buyer?: string | null;
+  readonly seller?: string | null;
+}
+
+/** Validate a proposed panel set; throws 400/403 on invalid or conflicting input. */
+export function validateProposedAssignment(
+  dealId: string,
+  panels: { primary: string[]; fallback: string[] },
+  ctx: AssignmentValidationContext = {},
+): { primary: Address[]; fallback: Address[] } {
+  if (!DEAL_RE.test(dealId)) throw httpError(400, "Invalid dealId");
+  if (!Array.isArray(panels.primary) || !Array.isArray(panels.fallback)) {
+    throw httpError(400, "primary and fallback must be arrays");
+  }
+  if (panels.primary.length === 0 || panels.fallback.length === 0) {
+    throw httpError(400, "primary and fallback panels must each be non-empty");
+  }
+  const primary = dedupe(panels.primary.map((entry, i) => asAddress(entry, `primary[${i}]`)));
+  const fallback = dedupe(panels.fallback.map((entry, i) => asAddress(entry, `fallback[${i}]`)));
+  const primarySet = new Set(primary.map((entry) => entry.toLowerCase()));
+  const overlap = fallback.filter((entry) => primarySet.has(entry.toLowerCase()));
+  if (overlap.length > 0) throw httpError(400, "primary and fallback panels must be disjoint");
+  const buyer = (ctx.buyer ?? "").toLowerCase();
+  const seller = (ctx.seller ?? "").toLowerCase();
+  for (const entry of [...primary, ...fallback]) {
+    const wallet = entry.toLowerCase();
+    if ((buyer && wallet === buyer) || (seller && wallet === seller)) {
+      throw httpError(403, "Proposed reviewer conflicts with a deal participant");
+    }
+  }
+  return { primary, fallback };
+}
+
+/** Append an assignment change to the durable audit trail. */
+export async function recordAssignmentAudit(entry: AssignmentAuditEntry): Promise<void> {
+  await getAuthPersistence().appendAssignmentAudit(entry);
+}
+
+/** Read the assignment audit trail (optionally scoped to one deal). */
+export function listAssignmentAudit(dealId?: string): Promise<AssignmentAuditEntry[]> {
+  return getAuthPersistence().listAssignmentAudit(dealId);
+}
+
 
 export function assignReviewers(dealId: string, panels: { primary: string[]; fallback: string[] }): ReviewCase {
   return reviewRegistry.assignReviewers(dealId, panels);

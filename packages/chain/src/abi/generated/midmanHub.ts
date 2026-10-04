@@ -347,6 +347,60 @@ export const MIDMAN_HUB_ABI = [
   },
   {
     "type": "function",
+    "name": "effectiveDeadlines",
+    "inputs": [
+      {
+        "name": "dealId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "delivery",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "inspection",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "negotiation",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "escalation",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "evidence",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "primary",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "fallbackEnd",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "available",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "eip712Domain",
     "inputs": [],
     "outputs": [

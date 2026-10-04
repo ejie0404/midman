@@ -160,10 +160,17 @@ importers:
         version: 5.4.5
 
   packages/store:
+    dependencies:
+      pg:
+        specifier: 8.11.3
+        version: 8.11.3
     devDependencies:
       '@types/node':
         specifier: 20.12.12
         version: 20.12.12
+      '@types/pg':
+        specifier: 8.10.9
+        version: 8.10.9
       typescript:
         specifier: 5.4.5
         version: 5.4.5

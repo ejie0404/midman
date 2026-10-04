@@ -20,13 +20,25 @@
 //   `Issued At: ${issuedAt ISO-8601}`
 //   `Expiration Time: ${expiresAt ISO-8601}`
 //
-// Challenges are stored in-memory with a TTL (default 300s), are single-use
-// (the nonce is consumed on the first successful verification), and are bound
-// to domain + chainId + wallet. Expired, reused, unknown-domain, and
-// chain-mismatched challenges are rejected.
+// Challenges are single-use, bound to domain + chainId + wallet, and persisted
+// behind the AuthPersistence adapter (memory default; durable in production).
+// Expired, reused, unknown-domain, and chain-mismatched challenges are
+// rejected.
+//
+// Verification is EOA-first (viem `verifyMessage` recovery) and falls back to
+// EIP-1271 for contract wallets via an injected `ContractWalletVerifier`
+// (a viem public client, or a `readContract isValidSignature` wrapper). The
+// state-dependent contract check happens at verification time; the login
+// server binds chainId + domain in the challenge envelope.
 import { randomBytes } from "node:crypto";
 import { verifyMessage, type Address, type Hash } from "viem";
 import { buildLoginChallenge, type LoginChallenge } from "../auth.js";
+import {
+  getAuthPersistence,
+  setAuthPersistence,
+  MemoryAuthPersistence,
+  type PersistedChallenge,
+} from "./persistence.js";
 
 /** Frozen purpose sentence (specs/phase2-threat-model.md LoginChallenge). */
 export const LOGIN_PURPOSE = "Midman sign-in only, no funds authorized" as const;
@@ -56,6 +68,16 @@ export interface StoredLoginChallenge extends LoginChallenge {
   consumed: boolean;
 }
 
+/**
+ * Minimal EIP-1271 verifier surface. viem's `publicClient.verifyMessage`
+ * satisfies this shape; tests may inject a mock.
+ */
+export interface ContractWalletVerifier {
+  verifyMessage(args: { address: Address; message: string; signature: Hash }): Promise<boolean>;
+}
+
+// Synchronous cache mirroring the durable adapter so issuance stays sync and
+// hot-path reads avoid an await. The adapter is authoritative on restart.
 const challenges = new Map<string, StoredLoginChallenge>();
 
 /** 32-byte hex nonce (bytes32, per the frozen LoginChallenge schema). */
@@ -113,7 +135,37 @@ export function issueLoginChallenge(params: {
   const challenge = buildLoginChallenge(params.domain, params.chainId, params.wallet, nonce, expiresAt);
   const stored: StoredLoginChallenge = { ...challenge, issuedAt: now, uri, consumed: false };
   challenges.set(nonce.toLowerCase(), stored);
+  // Durable mirror; issuance stays synchronous (fire-and-forget write-through).
+  void getAuthPersistence().putChallenge(nonce.toLowerCase(), toPersisted(stored));
   return { challenge, message: buildLoginMessage(stored), uri };
+}
+
+function toPersisted(challenge: StoredLoginChallenge): PersistedChallenge {
+  return {
+    domain: challenge.domain,
+    chainId: challenge.chainId,
+    wallet: challenge.wallet,
+    nonce: challenge.nonce,
+    expiresAt: challenge.expiresAt,
+    purpose: challenge.purpose,
+    issuedAt: challenge.issuedAt,
+    uri: challenge.uri,
+    consumed: challenge.consumed,
+  };
+}
+
+function fromPersisted(record: PersistedChallenge): StoredLoginChallenge {
+  return {
+    domain: record.domain,
+    chainId: record.chainId,
+    wallet: record.wallet,
+    nonce: record.nonce,
+    expiresAt: record.expiresAt,
+    purpose: record.purpose as LoginChallenge["purpose"],
+    issuedAt: record.issuedAt,
+    uri: record.uri,
+    consumed: record.consumed,
+  };
 }
 
 /** Look up an issued challenge by nonce (case-insensitive hex). */
@@ -130,10 +182,10 @@ function reject(statusCode: number, reason: string): LoginVerifyResult {
 }
 
 /**
- * Verify a login signature against a stored challenge and consume it.
+ * Verify a login signature against a stored challenge and consume it atomically.
  * Rejects: malformed nonce, unknown/reused/expired challenge, wrong wallet,
- * unknown domain (not the configured login domain), chain mismatch, and
- * invalid signature.
+ * unknown domain, chain mismatch, invalid EOA signature, and (when a
+ * contract-wallet verifier is supplied) an invalid EIP-1271 signature.
  */
 export async function verifyLoginSignature(params: {
   nonce: string;
@@ -144,14 +196,27 @@ export async function verifyLoginSignature(params: {
   expectedDomain?: string;
   expectedChainId?: number;
   nowSeconds?: number;
+  /** EIP-1271 verifier (viem public client or isValidSignature wrapper). */
+  contractWallet?: ContractWalletVerifier | null;
 }): Promise<LoginVerifyResult> {
   const now = params.nowSeconds ?? Math.floor(Date.now() / 1_000);
   if (!/^0x[0-9a-fA-F]{64}$/.test(params.nonce)) return reject(400, "Invalid challenge nonce");
-  const stored = getStoredChallenge(params.nonce);
+  const key = params.nonce.toLowerCase();
+  const persistence = getAuthPersistence();
+
+  let stored = challenges.get(key) ?? null;
+  if (!stored) {
+    const durable = await persistence.getChallenge(key);
+    if (durable) {
+      stored = fromPersisted(durable);
+      challenges.set(key, stored);
+    }
+  }
   if (!stored) return reject(401, "Unknown or already-used challenge");
   if (stored.consumed) return reject(401, "Challenge already used");
   if (now >= stored.expiresAt) {
-    challenges.delete(params.nonce.toLowerCase());
+    challenges.delete(key);
+    void persistence.delConsumeChallenge(key);
     return reject(401, "Challenge expired");
   }
   const expectedDomain = params.expectedDomain ?? loginDomain();
@@ -169,28 +234,45 @@ export async function verifyLoginSignature(params: {
     return reject(401, "Challenge wallet mismatch");
   }
 
-  // Mark consumed before awaiting verification to close the replay race; reset
-  // only if the signature itself is invalid.
-  stored.consumed = true;
+  // Atomic consume: exactly one caller wins the CAS. A losing racer sees null.
+  const consumed = await persistence.delConsumeChallenge(key);
+  challenges.delete(key);
+  if (!consumed) return reject(401, "Challenge already used");
+
+  const message = buildLoginMessage(stored);
   let valid = false;
   try {
     valid = await verifyMessage({
       address: stored.wallet as Address,
-      message: buildLoginMessage(stored),
+      message,
       signature: params.signature as Hash,
     });
   } catch {
     valid = false;
   }
+  if (!valid && params.contractWallet) {
+    // EIP-1271: recheck the state-dependent contract-wallet signature now.
+    try {
+      valid = await params.contractWallet.verifyMessage({
+        address: stored.wallet as Address,
+        message,
+        signature: params.signature as Hash,
+      });
+    } catch {
+      valid = false;
+    }
+  }
   if (!valid) {
     stored.consumed = false;
+    challenges.set(key, stored);
+    await persistence.putChallenge(key, toPersisted(stored));
     return reject(401, "Invalid login signature");
   }
-  challenges.delete(params.nonce.toLowerCase());
   return { ok: true, challenge: stored, wallet: stored.wallet as Address };
 }
 
-/** Test helper: clear all issued challenges. */
+/** Test helper: clear all issued challenges and restore a fresh adapter. */
 export function __resetChallengesForTests(): void {
   challenges.clear();
+  setAuthPersistence(new MemoryAuthPersistence());
 }

@@ -63,12 +63,14 @@ contract Deploy is Script {
         address admission = vm.envOr("ADMISSION_SIGNER", deployer);
         address treasury = vm.envOr("TREASURY", deployer);
 
-        address[] memory primary = new address[](3);
-        address[] memory fb = new address[](3);
+        address[] memory primary = new address[](5);
+        address[] memory fb = new address[](5);
         address[] memory veto = new address[](3);
-        for (uint256 i = 0; i < 3; i++) {
+        for (uint256 i = 0; i < 5; i++) {
             primary[i] = _panelAddr("PRIMARY", i, 0x101 + i);
             fb[i] = _panelAddr("FALLBACK", i, 0x201 + i);
+        }
+        for (uint256 i = 0; i < 3; i++) {
             veto[i] = _panelAddr("VETO", i, 0x301 + i);
         }
 
@@ -103,9 +105,11 @@ contract Deploy is Script {
         console.log("PAUSER:", pauser);
         console.log("ADMISSION:", admission);
         console.log("TREASURY:", treasury);
-        for (uint256 i = 0; i < 3; i++) {
+        for (uint256 i = 0; i < 5; i++) {
             console.log(string.concat("PRIMARY_", vm.toString(i), ":"), primary[i]);
             console.log(string.concat("FALLBACK_", vm.toString(i), ":"), fb[i]);
+        }
+        for (uint256 i = 0; i < 3; i++) {
             console.log(string.concat("VETO_", vm.toString(i), ":"), veto[i]);
         }
         console.logBytes32(FEE_ID);

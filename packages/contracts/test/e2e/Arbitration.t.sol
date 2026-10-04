@@ -534,18 +534,18 @@ contract ArbitrationTest is Test {
         _advanceToPrimary(escAt, t.dealId);
 
         // Rotate panels via the 72h timelock AFTER evidence but BEFORE queue.
-        uint256[] memory npk = new uint256[](3);
-        uint256[] memory nfk = new uint256[](3);
-        address[] memory np = new address[](3);
-        address[] memory nf = new address[](3);
+        uint256[] memory npk = new uint256[](5);
+        uint256[] memory nfk = new uint256[](5);
+        address[] memory np = new address[](5);
+        address[] memory nf = new address[](5);
         address[] memory nv = new address[](3);
-        for (uint256 i = 0; i < 3; i++) {
+        for (uint256 i = 0; i < 5; i++) {
             npk[i] = 0xB001 + i;
             nfk[i] = 0xC001 + i;
             np[i] = vm.addr(npk[i]);
             nf[i] = vm.addr(nfk[i]);
-            nv[i] = vm.addr(vetoPks[i]);
         }
+        for (uint256 i = 0; i < 3; i++) nv[i] = vm.addr(vetoPks[i]);
         uint256 g = gasleft();
         vm.prank(governance);
         policies.proposePanel(np, nf, nv);
@@ -596,14 +596,14 @@ contract ArbitrationTest is Test {
         uint64 execAt = hub.getDeal(t.dealId).rulingExecuteAt;
 
         // Rotate during the execution delay.
-        address[] memory np = new address[](3);
-        address[] memory nf = new address[](3);
+        address[] memory np = new address[](5);
+        address[] memory nf = new address[](5);
         address[] memory nv = new address[](3);
-        for (uint256 i = 0; i < 3; i++) {
+        for (uint256 i = 0; i < 5; i++) {
             np[i] = vm.addr(0xD001 + i);
             nf[i] = vm.addr(0xE001 + i);
-            nv[i] = vm.addr(vetoPks[i]);
         }
+        for (uint256 i = 0; i < 3; i++) nv[i] = vm.addr(vetoPks[i]);
         vm.prank(governance);
         policies.proposePanel(np, nf, nv);
         vm.warp(_now() + 72 hours + 1);

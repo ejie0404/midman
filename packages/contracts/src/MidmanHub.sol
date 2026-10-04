@@ -608,4 +608,25 @@ contract MidmanHub is EIP712, ReentrancyGuard {
         require(d.funded, BadPhase());
         return d.disputeOpenedAt + uint64(MidmanDK.CATASTROPHIC_ESCAPE_SECONDS);
     }
+
+    /// @notice Authoritative outage-adjusted deadlines for every anchored clock
+    /// (delivery, inspection, negotiation, escalation, evidence, primary,
+    /// fallback). `available` is false when any required outage history or feed
+    /// read is missing/malformed. escapeAt is deliberately NOT outage-adjusted.
+    function effectiveDeadlines(bytes32 dealId)
+        external
+        view
+        returns (
+            uint64 delivery,
+            uint64 inspection,
+            uint64 negotiation,
+            uint64 escalation,
+            uint64 evidence,
+            uint64 primary,
+            uint64 fallbackEnd,
+            bool available
+        )
+    {
+        return HubDispute.effectiveDeadlines(state, policies, dealId);
+    }
 }

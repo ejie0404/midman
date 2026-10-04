@@ -80,6 +80,7 @@ contract MockFeed {
     uint80 public roundId = 1;
     mapping(uint80 => Round) public rounds;
     uint256 public latestStartedAt = 1;
+    bool public latestBroken; // report a zero round id to emulate a malformed read
 
     struct Round {
         int256 ans;
@@ -91,8 +92,14 @@ contract MockFeed {
         rounds[1] = Round({ans: 0, startedAt: 1});
     }
 
+    /// @notice Emulate a malformed latest round (round id 0) for feed-unknown tests.
+    function setLatestBroken(bool b) external {
+        latestBroken = b;
+    }
+
     function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
-        return (roundId, answer, latestStartedAt, latestStartedAt, roundId);
+        uint80 rid = latestBroken ? 0 : roundId;
+        return (rid, answer, latestStartedAt, latestStartedAt, rid);
     }
 
     function getRoundData(uint80 rid) external view returns (uint80, int256, uint256, uint256, uint80) {

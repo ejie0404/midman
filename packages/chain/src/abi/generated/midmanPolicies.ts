@@ -50,7 +50,20 @@ export const MIDMAN_POLICIES_ABI = [
   },
   {
     "type": "function",
-    "name": "MAX_OUTAGES",
+    "name": "MAX_HISTORY_AGE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_RETAINED",
     "inputs": [],
     "outputs": [
       {
@@ -411,6 +424,30 @@ export const MIDMAN_POLICIES_ABI = [
   },
   {
     "type": "function",
+    "name": "outageAt",
+    "inputs": [
+      {
+        "name": "i",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "start",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "end",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "outageCount",
     "inputs": [],
     "outputs": [
@@ -458,37 +495,32 @@ export const MIDMAN_POLICIES_ABI = [
   },
   {
     "type": "function",
-    "name": "outageRecent",
-    "inputs": [
-      {
-        "name": "k",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
+    "name": "outageSaturated",
+    "inputs": [],
     "outputs": [
       {
-        "name": "start",
-        "type": "uint64",
-        "internalType": "uint64"
-      },
-      {
-        "name": "end",
-        "type": "uint64",
-        "internalType": "uint64"
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "stateMutability": "view"
   },
   {
     "type": "function",
-    "name": "outageRetained",
-    "inputs": [],
+    "name": "outageSeen",
+    "inputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
     "outputs": [
       {
         "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "stateMutability": "view"
@@ -715,6 +747,19 @@ export const MIDMAN_POLICIES_ABI = [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "prunedBefore",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -1139,6 +1184,11 @@ export const MIDMAN_POLICIES_ABI = [
   {
     "type": "error",
     "name": "NotGovernance",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OutageTooOld",
     "inputs": []
   },
   {

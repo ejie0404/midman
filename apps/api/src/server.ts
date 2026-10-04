@@ -1,8 +1,8 @@
 import { pathToFileURL } from "node:url";
 import Fastify from "fastify";
-import { createRegistry, hasKvStore } from "@midman/store";
+import { closeStore, createRegistry, hasKvStore, migrateStore } from "@midman/store";
 import { loadConfig } from "./config.js";
-import { createStore, type Store } from "./db.js";
+import { createStoreFromEnv, type Store } from "./db.js";
 import { buildDeps, registerRoutes } from "./routes.js";
 import { registerEvidenceRoutes } from "./evidence/routes.js";
 import { registerAuthGuards, registerAuthRoutes } from "./auth/middleware.js";
@@ -25,13 +25,21 @@ export interface ServerOptions {
    * development and the existing (auth-agnostic) unit tests keep working.
    */
   readonly auth?: boolean;
+  /**
+   * A single configured store to share between routes and durable registries.
+   * When omitted the server opens one via createStoreFromEnv(). Passing the
+   * store in is what guarantees API instance B reads A's committed writes.
+   */
+  readonly store?: Store;
+  /** Run store migrations on boot. Defaults to true when DATABASE_URL is set. */
+  readonly runMigrations?: boolean;
 }
 
 /**
  * Attach the store-backed registry adapter to every in-memory metadata
  * registry (evidence, delivery forms, messages, review, approvals,
  * proposals) and rehydrate prior state. No-op when the store has no kv
- * backend (dev MemoryStore), so behavior is unchanged there.
+ * backend, so behavior is unchanged there.
  */
 export async function configureDurableRegistries(store: Store): Promise<boolean> {
   if (!hasKvStore(store)) return false;
@@ -47,9 +55,15 @@ export async function configureDurableRegistries(store: Store): Promise<boolean>
   return true;
 }
 
+/**
+ * Build the HTTP server around ONE store. All route deps and (via
+ * buildServerAsync) the durable registries share that instance; there is no
+ * second pool. Synchronous so the existing tests can call buildServer()
+ * directly.
+ */
 export function buildServer(options: ServerOptions = {}) {
   const config = loadConfig();
-  const store = createStore();
+  const store = options.store ?? createStoreFromEnv();
   const deps = buildDeps(store);
   const app = Fastify({ logger: false });
 
@@ -78,22 +92,51 @@ export function buildServer(options: ServerOptions = {}) {
   return app;
 }
 
-/** Build + hydrate durable registries. Used by the CLI/worker boot path. */
+/**
+ * Build + migrate + hydrate durable registries, all over a single store. Used
+ * by the CLI/worker boot path. Migrations are opt-in per env (skipped when
+ * MIDMAN_RUN_MIGRATIONS=0 or DATABASE_URL is unset).
+ */
 export async function buildServerAsync(options: ServerOptions = {}) {
   const config = loadConfig();
-  const store = createStore();
-  if (hasKvStore(store)) {
-    await configureDurableRegistries(store);
-  }
-  const app = buildServer(options);
-  return { app, config, durableRegistries: hasKvStore(store) };
+  const store = options.store ?? createStoreFromEnv();
+  const runMigrations =
+    options.runMigrations ?? (config.databaseUrl !== null && process.env["MIDMAN_RUN_MIGRATIONS"] !== "0");
+  let migrationsApplied: string[] = [];
+  if (runMigrations) migrationsApplied = await migrateStore(store);
+  const durableRegistries = await configureDurableRegistries(store);
+  const app = buildServer({ ...options, store });
+  return { app, config, store, durableRegistries, migrationsApplied };
+}
+
+/** Graceful shutdown: close HTTP then release the pool exactly once. */
+export function installShutdownHandlers(
+  app: { close(): Promise<void> },
+  store: Store,
+  exit: (code: number) => void = (code) => process.exit(code),
+): () => Promise<void> {
+  let shuttingDown = false;
+  const shutdown = async (): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      await app.close();
+    } finally {
+      await closeStore(store);
+      exit(0);
+    }
+  };
+  process.on("SIGTERM", () => void shutdown());
+  process.on("SIGINT", () => void shutdown());
+  return shutdown;
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   buildServerAsync({ auth: true })
-    .then(({ app, config }) =>
-      app.listen({ port: config.port, host: "0.0.0.0" }),
-    )
+    .then(async ({ app, config, store }) => {
+      installShutdownHandlers(app, store);
+      await app.listen({ port: config.port, host: "0.0.0.0" });
+    })
     .catch((error) => {
       console.error(error);
       process.exit(1);

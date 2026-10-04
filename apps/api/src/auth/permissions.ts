@@ -12,6 +12,13 @@ import type { FastifyRequest } from "fastify";
 import type { Address } from "viem";
 import { verifySignedRequest } from "../evidence/access.js";
 import { hashInvitationToken, isInvitationUsable } from "../invitations.js";
+import {
+  getAuthPersistence,
+  setAuthPersistence,
+  MemoryAuthPersistence,
+  type RedeemInvitationResult,
+  type StoredInvitation,
+} from "./persistence.js";
 import { readSession, type Session } from "./session.js";
 
 export function httpError(statusCode: number, message: string): Error & { statusCode: number } {
@@ -107,6 +114,22 @@ export async function requireCreatorOrParty(
   throw httpError(403, "Wallet is not the creator or a party to this draft");
 }
 
+/** Require the wallet to be the draft creator. */
+export async function requireCreator(
+  req: FastifyRequest,
+  store: PartyStore,
+  idOrDealId: string,
+  wallet?: string,
+): Promise<true> {
+  const resolvedWallet = wallet ?? requireAuth(req).wallet;
+  const draft = await resolveDraft(store, idOrDealId);
+  if (!draft) throw httpError(404, "Draft not found");
+  if (!draft.creatorWallet || draft.creatorWallet.toLowerCase() !== resolvedWallet.toLowerCase()) {
+    throw httpError(403, "Wallet is not the draft creator");
+  }
+  return true;
+}
+
 export const OPERATOR_ROLES = [
   "pauser",
   "admission",
@@ -188,22 +211,18 @@ export async function isOperatorRequest(
 }
 
 // ---------------------------------------------------------------------------
-// Invitation-token enforcement
+// Durable invitation-token enforcement
 //
 // routes.ts generates the raw token in POST /drafts/:id/invite and never
-// persists a retrievable copy (only the audit hash). To enforce acceptance
-// without editing routes.ts, registerAuthGuards observes the invite response
-// via onSend and records sha256(token) + expiry here; accept then verifies the
-// presented raw token against that hash (single-use, expiring, revocable).
+// persists a retrievable copy (only the audit hash). registerAuthGuards
+// observes the invite response via onSend and records sha256(token) + expiry +
+// intended counterparty through the AuthPersistence adapter. Accept then
+// redeems the presented raw token with a compare-and-set call: it must hash to
+// the stored value and be unexpired/unrevoked/unconsumed, and the accepting
+// wallet must match the intended counterparty (when set). After redemption the
+// participant authenticates via their own session; the secret is no longer
+// needed.
 // ---------------------------------------------------------------------------
-
-interface StoredInvitation {
-  readonly tokenHash: string;
-  readonly dealId: string;
-  readonly createdAt: string;
-  readonly expiresAt: string;
-  revoked: boolean;
-}
 
 const invitations = new Map<string, StoredInvitation>();
 
@@ -215,22 +234,35 @@ export function recordInvitation(
   draftId: string,
   token: string,
   expiresAtIso: string,
+  intendedCounterparty: string | null = null,
   nowIso: string = new Date().toISOString(),
-): void {
-  invitations.set(invitationKey(draftId), {
-    tokenHash: hashInvitationToken(token),
+): StoredInvitation {
+  const record: StoredInvitation = {
+    draftId,
     dealId: draftId,
+    tokenHash: hashInvitationToken(token),
+    intendedCounterparty,
     createdAt: nowIso,
     expiresAt: expiresAtIso,
     revoked: false,
-  });
+    consumed: false,
+    redeemedBy: null,
+    redeemTx: null,
+  };
+  invitations.set(invitationKey(draftId), record);
+  void getAuthPersistence().recordInvitation(record);
+  return record;
 }
 
 export function revokeInvitation(draftId: string): void {
   const entry = invitations.get(invitationKey(draftId));
-  if (entry) entry.revoked = true;
+  if (entry) {
+    entry.revoked = true;
+    void getAuthPersistence().revokeInvitation(draftId);
+  }
 }
 
+/** Sync probe against the in-memory mirror (used for diagnostics/tests). */
 export function verifyInvitation(
   draftId: string,
   token: string,
@@ -242,7 +274,30 @@ export function verifyInvitation(
   return entry.tokenHash === hashInvitationToken(token);
 }
 
-/** Test helper: clear the in-memory invitation registry. */
+/**
+ * Compare-and-set redemption through the adapter. Verifies the raw token hashes
+ * to the stored value and that it is unexpired/unrevoked/unconsumed and bound
+ * to the redeeming wallet, then consumes it in a single adapter call.
+ */
+export async function redeemInvitation(
+  draftId: string,
+  rawToken: string,
+  wallet: string,
+  opts: { nowIso?: string; redeemTx?: string | null } = {},
+): Promise<RedeemInvitationResult> {
+  const nowIso = opts.nowIso ?? new Date().toISOString();
+  const result = await getAuthPersistence().redeemInvitation(draftId, {
+    tokenHash: hashInvitationToken(rawToken),
+    wallet,
+    nowIso,
+    redeemTx: opts.redeemTx ?? null,
+  });
+  if (result.ok) invitations.set(invitationKey(draftId), result.invitation);
+  return result;
+}
+
+/** Test helper: clear the in-memory invitation registry and reset the adapter. */
 export function __resetInvitationsForTests(): void {
   invitations.clear();
+  setAuthPersistence(new MemoryAuthPersistence());
 }

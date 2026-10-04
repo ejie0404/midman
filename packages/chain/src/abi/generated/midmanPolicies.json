@@ -3,7 +3,7 @@
   "source": "forge-artifact",
   "artifact": "packages/contracts/out/MidmanPolicies.sol/MidmanPolicies.json",
   "solc": "0.8.26+commit.8a97fa7a",
-  "generatedAt": "2026-10-04T05:55:51.803Z",
+  "generatedAt": "2026-10-04T16:03:45.597Z",
   "abi": [
     {
       "type": "constructor",
@@ -53,7 +53,20 @@
     },
     {
       "type": "function",
-      "name": "MAX_OUTAGES",
+      "name": "MAX_HISTORY_AGE",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "MAX_RETAINED",
       "inputs": [],
       "outputs": [
         {
@@ -414,6 +427,30 @@
     },
     {
       "type": "function",
+      "name": "outageAt",
+      "inputs": [
+        {
+          "name": "i",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "start",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "end",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
       "name": "outageCount",
       "inputs": [],
       "outputs": [
@@ -461,37 +498,32 @@
     },
     {
       "type": "function",
-      "name": "outageRecent",
-      "inputs": [
-        {
-          "name": "k",
-          "type": "uint256",
-          "internalType": "uint256"
-        }
-      ],
+      "name": "outageSaturated",
+      "inputs": [],
       "outputs": [
         {
-          "name": "start",
-          "type": "uint64",
-          "internalType": "uint64"
-        },
-        {
-          "name": "end",
-          "type": "uint64",
-          "internalType": "uint64"
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
         }
       ],
       "stateMutability": "view"
     },
     {
       "type": "function",
-      "name": "outageRetained",
-      "inputs": [],
+      "name": "outageSeen",
+      "inputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
       "outputs": [
         {
           "name": "",
-          "type": "uint256",
-          "internalType": "uint256"
+          "type": "bool",
+          "internalType": "bool"
         }
       ],
       "stateMutability": "view"
@@ -718,6 +750,19 @@
       ],
       "outputs": [],
       "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "prunedBefore",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "stateMutability": "view"
     },
     {
       "type": "function",
@@ -1142,6 +1187,11 @@
     {
       "type": "error",
       "name": "NotGovernance",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "OutageTooOld",
       "inputs": []
     },
     {

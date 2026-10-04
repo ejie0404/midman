@@ -74,12 +74,14 @@ contract ForkTest is Test {
         seller = vm.addr(sellerPk);
         admission = vm.addr(admissionPk);
         address gov = vm.addr(0x60);
-        address[] memory prim = new address[](3);
-        address[] memory fb = new address[](3);
+        address[] memory prim = new address[](5);
+        address[] memory fb = new address[](5);
         address[] memory vv = new address[](3);
-        for (uint256 i = 0; i < 3; i++) {
+        for (uint256 i = 0; i < 5; i++) {
             prim[i] = vm.addr(0x101 + i);
             fb[i] = vm.addr(0x201 + i);
+        }
+        for (uint256 i = 0; i < 3; i++) {
             vv[i] = vm.addr(0x301 + i);
         }
         policies = new MidmanPolicies(gov, address(0x9A05), admission, address(0x7EA5), REAL_FEED, prim, fb, vv);
@@ -237,7 +239,7 @@ contract ForkTest is Test {
 
     function testFork_RealOutageRecorded() public onlyFork {
         policies.reportOutage(DOWN_ROUND);
-        (uint64 s, uint64 e) = policies.outages(0);
+        (uint64 s, uint64 e) = policies.outageAt(0);
         assertEq(s, DOWN_START, "recorded start");
         assertEq(e, UP_START, "recorded end");
         // Funding after a historical outage is unaffected; escape math unchanged.

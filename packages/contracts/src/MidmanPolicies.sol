@@ -17,6 +17,12 @@ contract MidmanPolicies {
     uint256 public constant ROTATION_DELAY = 72 hours;
     uint256 public constant UNPAUSE_DELAY = 24 hours;
 
+    // Panel floor sizes for BOTH construction and rotation: a required
+    // 5-member primary/fallback panel can never be rotated down to 3.
+    uint8 internal constant MIN_PRIMARY = 5;
+    uint8 internal constant MIN_FALLBACK = 5;
+    uint8 internal constant MIN_VETO = 3;
+
     // ---- Policy records (append-only) ----
     struct FeePolicy {
         bool exists;
@@ -96,16 +102,24 @@ contract MidmanPolicies {
     PendingAddress public pendingFeed;
 
     // ---- Outage ledger (chain-global truth, P-09) ----
-    // Ring buffer: reporting never bricks at capacity; the oldest interval is
-    // evicted. Deadline math always reads the MOST RECENT entries, which are
-    // the only ones that can intersect a live deal's clocks.
+    // Append-only retained intervals with strictly absolute-age pruning and a
+    // permanent dedupe set. There is NO capacity eviction: intervals are only
+    // dropped once their end is older than MAX_HISTORY_AGE (comfortably longer
+    // than the 60-day escape horizon), and `prunedBefore` records the maximum
+    // dropped end so a clock anchored before it is reported UNKNOWN rather than
+    // reconstructed with a shorter deadline. Beyond MAX_RETAINED the ledger is
+    // flagged saturated and deadline math reports UNKNOWN.
     struct Outage {
         uint64 start;
         uint64 end;
     }
-    mapping(uint256 => Outage) private outageSlots;
-    uint256 public outageTotal; // intervals ever recorded (monotone)
-    uint256 public constant MAX_OUTAGES = 64;
+    Outage[] internal outageLedger;
+    uint256 public outageTotal; // intervals ever accepted (monotone)
+    uint64 public prunedBefore; // max end of any pruned interval (monotone)
+    bool public outageSaturated; // retained count exceeded MAX_RETAINED
+    mapping(bytes32 => bool) public outageSeen; // permanent dedupe over (start,end)
+    uint256 public constant MAX_RETAINED = 256;
+    uint256 public constant MAX_HISTORY_AGE = 180 days;
 
     // ---- Events ----
     event PolicyRegistered(bytes32 indexed policyId, bytes32 contentHash);
@@ -119,6 +133,7 @@ contract MidmanPolicies {
     error NotGovernance();
     error AlreadyRegistered();
     error BadPanel();
+    error OutageTooOld();
     error NoPending();
     error TooEarly();
     error BadAddress();
@@ -149,16 +164,19 @@ contract MidmanPolicies {
         _setPanel(1, primary_, fallback_, veto_);
     }
 
-    /// @notice Panel admission rules (P-05/P-15): minimum sizes matching the
-    /// tier quorum table (hub quorums are 2 or 3, so 3 distinct members is the
-    /// floor), distinct members within each house (duplicates would silently
-    /// raise the effective quorum or brick it), and pairwise-disjoint houses
-    /// (a reviewer must never sit on two panels deciding the same deal).
+    /// @notice Panel admission rules (P-05/P-15): a required 5-member primary
+    /// and fallback panel (3-member veto), distinct members within each house
+    /// (duplicates would silently raise the effective quorum or brick it), and
+    /// pairwise-disjoint houses (a reviewer must never sit on two panels
+    /// deciding the same deal). Applied identically at construction and
+    /// rotation so a valid 5/5/3 panel can never be shrunk to 3.
     function _validatePanel(address[] memory primary_, address[] memory fallback_, address[] memory veto_)
         internal
         pure
     {
-        require(primary_.length >= 3 && fallback_.length >= 3 && veto_.length >= 3, BadPanel());
+        require(
+            primary_.length >= MIN_PRIMARY && fallback_.length >= MIN_FALLBACK && veto_.length >= MIN_VETO, BadPanel()
+        );
         _distinct(primary_);
         _distinct(fallback_);
         _distinct(veto_);
@@ -346,25 +364,66 @@ contract MidmanPolicies {
 
     // ---- Outage ledger ----
     /// @notice Record a verified sequencer outage from a historical feed round.
-    /// `roundId` must be a round reporting down (answer 1) whose successor
-    /// reports up (answer 0). Interval is [down.startedAt, up.startedAt].
-    /// Beyond capacity the oldest retained interval is evicted (ring write).
+    /// `roundId` must be a down round (answer 1) whose successor reports up
+    /// (answer 0); interval is [down.startedAt, up.startedAt]. The feed round is
+    /// validated deeply (round identity, round consistency, non-zero startedAt,
+    /// updatedAt not in the future). Duplicates are rejected FOREVER by their
+    /// exact (start,end) key, even after the interval is pruned. Intervals that
+    /// ended before `block.timestamp - MAX_HISTORY_AGE` are rejected outright so
+    /// a late historical report can never age out a live interval. Retained
+    /// intervals older than MAX_HISTORY_AGE are pruned by absolute age only.
     function reportOutage(uint80 roundId) external {
-        (uint80 rid, int256 answer, uint256 startedAt,,) = _roundData(roundId);
-        require(rid == roundId && answer == 1, BadPanel());
-        (, int256 nextAnswer, uint256 nextStartedAt,,) = _roundData(roundId + 1);
-        require(nextAnswer == 0 && nextStartedAt > startedAt, BadPanel());
-        require(nextStartedAt <= block.timestamp, BadPanel());
-        uint64 s = uint64(startedAt);
-        uint64 e = uint64(nextStartedAt);
-        uint256 retained = outageRetained();
-        for (uint256 k = 0; k < retained; k++) {
-            (uint64 rs, uint64 re) = outageRecent(k);
-            require(rs != s || re != e, AlreadyRegistered());
+        uint64 s;
+        uint64 e;
+        {
+            (uint80 rid, int256 ans, uint256 st, uint256 upd, uint80 air) = _roundData(roundId);
+            require(rid == roundId && ans == 1, BadPanel());
+            require(st != 0 && st <= block.timestamp, BadPanel());
+            require(upd != 0 && upd <= block.timestamp, BadPanel());
+            require(air == rid, BadPanel());
+            (uint80 rid2, int256 ans2, uint256 st2, uint256 upd2, uint80 air2) = _roundData(roundId + 1);
+            require(rid2 == roundId + 1 && ans2 == 0, BadPanel());
+            require(st2 > st && st2 <= block.timestamp, BadPanel());
+            require(upd2 != 0 && upd2 <= block.timestamp, BadPanel());
+            require(air2 == rid2, BadPanel());
+            s = uint64(st);
+            e = uint64(st2);
         }
-        outageSlots[outageTotal % MAX_OUTAGES] = Outage({start: s, end: e});
+        bytes32 key = keccak256(abi.encode(s, e));
+        require(!outageSeen[key], AlreadyRegistered());
+        if (block.timestamp > MAX_HISTORY_AGE) {
+            require(e >= uint64(block.timestamp - MAX_HISTORY_AGE), OutageTooOld());
+        }
+        outageSeen[key] = true;
+        _pruneOld();
+        outageLedger.push(Outage({start: s, end: e}));
         outageTotal += 1;
+        if (outageLedger.length > MAX_RETAINED) outageSaturated = true;
         emit OutageRecorded(s, e);
+    }
+
+    /// @notice Compact retained intervals: drop any whose end is strictly older
+    /// than MAX_HISTORY_AGE, advancing `prunedBefore` to the max dropped end.
+    function _pruneOld() internal {
+        uint256 nowTs = block.timestamp;
+        if (nowTs <= MAX_HISTORY_AGE) return;
+        uint64 threshold = uint64(nowTs - MAX_HISTORY_AGE);
+        uint256 len = outageLedger.length;
+        uint256 write = 0;
+        uint64 newPruned = prunedBefore;
+        for (uint256 i = 0; i < len; i++) {
+            Outage memory o = outageLedger[i];
+            if (o.end < threshold) {
+                if (o.end > newPruned) newPruned = o.end;
+            } else {
+                if (write != i) outageLedger[write] = o;
+                write++;
+            }
+        }
+        if (write != len) {
+            for (uint256 j = len; j > write; j--) outageLedger.pop();
+            prunedBefore = newPruned;
+        }
     }
 
     function _roundData(uint80 roundId)
@@ -380,26 +439,18 @@ contract MidmanPolicies {
     }
 
     function outageCount() external view returns (uint256) {
-        return outageRetained();
+        return outageLedger.length;
     }
 
-    /// @notice Intervals currently retained (at most MAX_OUTAGES).
-    function outageRetained() public view returns (uint256) {
-        return outageTotal > MAX_OUTAGES ? MAX_OUTAGES : outageTotal;
+    /// @notice i-th retained interval (indexer-compatible access).
+    function outageAt(uint256 i) public view returns (uint64 start, uint64 end) {
+        require(i < outageLedger.length, BadPanel());
+        Outage storage o = outageLedger[i];
+        return (o.start, o.end);
     }
 
-    /// @notice i-th oldest RETAINED interval (indexer-compatible access).
+    /// @notice Legacy alias for the i-th retained interval.
     function outages(uint256 i) external view returns (uint64 start, uint64 end) {
-        uint256 retained = outageRetained();
-        require(i < retained, BadPanel());
-        Outage storage o = outageSlots[(outageTotal - retained + i) % MAX_OUTAGES];
-        return (o.start, o.end);
-    }
-
-    /// @notice k-th MOST RECENT interval (k=0 is newest). Used by deadline math.
-    function outageRecent(uint256 k) public view returns (uint64 start, uint64 end) {
-        require(k < outageRetained(), BadPanel());
-        Outage storage o = outageSlots[(outageTotal - 1 - k) % MAX_OUTAGES];
-        return (o.start, o.end);
+        return outageAt(i);
     }
 }

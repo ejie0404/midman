@@ -321,8 +321,9 @@ contract DeployScriptsTest is Test, DeployProdBase, DeployDevBase {
         MidmanPolicies pol = MidmanPolicies(out.policies);
         assertEq(pol.authEpoch(), 1, "epoch");
         assertTrue(pol.isPrimary(1, ANVIL_1), "anvil1 primary");
-        assertTrue(pol.isFallback(1, ANVIL_4), "anvil4 fallback");
-        assertTrue(pol.isVeto(ANVIL_7), "anvil7 veto");
-        assertFalse(pol.isPrimary(1, ANVIL_4), "anvil4 not primary");
+        assertTrue(pol.isPrimary(1, ANVIL_5), "anvil5 primary");
+        assertTrue(pol.isFallback(1, ANVIL_6), "anvil6 fallback");
+        assertTrue(pol.isVeto(ANVIL_11), "anvil11 veto");
+        assertFalse(pol.isPrimary(1, ANVIL_6), "anvil6 not primary");
     }
 }

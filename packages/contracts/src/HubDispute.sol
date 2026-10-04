@@ -128,33 +128,57 @@ library HubDispute {
     }
 
     // ================= Outage-adjusted deadlines (P-09) =================
-    // One consistent algorithm for every adjustable clock:
-    //   eff = original + sum over relevant outage intervals of
-    //         (overlap([anchor, original + grace]) + grace)
-    // "Relevant" = the most recent ledger entries (the only ones that can
-    // intersect a live clock) PLUS the live trailing interval derived from
-    // the feed itself, which closes the report-delay window: an outage that
-    // ended but was never reported, or is still ongoing, still counts.
-    // escapeAt NEVER passes through here (fixed 60-day cutoff).
+    // One consistent algorithm for every adjustable clock. For an anchored
+    // clock with anchor A and original deadline D0 = A + duration:
+    //   downtime(A,E) = SUM over retained outages i of
+    //                   max(0, min(E, end_i) - max(A, start_i))
+    //   grace(A,E)    = GRACE * (# retained outages with overlap(A,E,i) > 0)
+    //   E is the least fixpoint of  E = D0 + downtime(A,E) + grace(A,E)
+    // This inherently extends for outages occurring INSIDE an already-extended
+    // window and preserves the remaining usable time when an outage crosses the
+    // original deadline. The feed's live trailing interval (ongoing or just
+    // recovered) is merged once, deduped by exact interval. escapeAt NEVER
+    // passes through here (fixed 60-day cutoff).
+    //
+    // Availability: available=false when the clock's anchor precedes
+    // `prunedBefore`, when the ledger is saturated (> MAX_RETAINED), when the
+    // fixpoint does not converge within MAX_PASSES, or when a required feed
+    // read is malformed. Missing/uncertain history surfaces as UNKNOWN, never
+    // as a shorter deadline.
+    uint256 internal constant MAX_PASSES = 64;
+
     struct FeedStatus {
         bool ok;
         bool up;
         int256 answer;
-        uint256 startedAt;
+        uint64 startedAt;
+        uint64 updatedAt;
+        uint80 roundId;
         uint80 answeredInRound;
     }
 
-    function feedStatus(MidmanPolicies pol) internal view returns (FeedStatus memory fs) {
-        (bool ok, bytes memory ret) = pol.sequencerFeed().staticcall(abi.encodeWithSignature("latestRoundData()"));
-        if (!ok || ret.length != 160) return FeedStatus(false, false, 0, 0, 0);
-        (uint80 rid, int256 ans, uint256 startedAt,, uint80 air) =
+    /// @notice Strict latest-round read. Any staticcall failure, short/wrong
+    /// return, zero round id, round inconsistency, zero/future startedAt or
+    /// zero/future updatedAt yields ok=false (feed state UNKNOWN).
+    function readFeed(MidmanPolicies pol) internal view returns (FeedStatus memory fs) {
+        (bool success, bytes memory ret) = pol.sequencerFeed().staticcall(abi.encodeWithSignature("latestRoundData()"));
+        if (!success || ret.length != 160) return fs;
+        (uint80 rid, int256 ans, uint256 startedAt, uint256 updatedAt, uint80 air) =
             abi.decode(ret, (uint80, int256, uint256, uint256, uint80));
-        rid;
-        return FeedStatus(true, ans == 0, ans, startedAt, air);
+        if (rid == 0 || air != rid) return fs;
+        if (startedAt == 0 || startedAt > block.timestamp) return fs;
+        if (updatedAt == 0 || updatedAt > block.timestamp) return fs;
+        fs.ok = true;
+        fs.up = ans == 0;
+        fs.answer = ans;
+        fs.startedAt = uint64(startedAt);
+        fs.updatedAt = uint64(updatedAt);
+        fs.roundId = rid;
+        fs.answeredInRound = air;
     }
 
     function feedUp(MidmanPolicies pol) internal view returns (bool) {
-        FeedStatus memory fs = feedStatus(pol);
+        FeedStatus memory fs = readFeed(pol);
         return fs.ok && fs.up;
     }
 
@@ -163,102 +187,220 @@ library HubDispute {
     }
 
     /// @notice Trailing outage interval straight from the feed (never reverts).
-    /// Ongoing outage: [downStart, now]. Just recovered: [prevDownStart,
-    /// latestStart]. Otherwise none. The caller dedupes against the ledger.
-    function liveTrailing(MidmanPolicies pol) internal view returns (bool live, uint64 s, uint64 e) {
-        FeedStatus memory fs = feedStatus(pol);
-        if (!fs.ok) return (false, 0, 0);
-        if (!fs.up) return (true, uint64(fs.startedAt), now_());
-        if (fs.answeredInRound == 0) return (false, 0, 0);
+    /// ok=false means the read was malformed/unknown (deadline math must report
+    /// unavailable). Ongoing outage: [startedAt, now]. Just recovered:
+    /// [prevDownStart, latestStart]. Otherwise has=false. A missing prior round
+    /// (all-zero data) is benign "none", not malformed.
+    function liveTrailing(MidmanPolicies pol) internal view returns (bool ok, bool has, uint64 s, uint64 e) {
+        FeedStatus memory fs = readFeed(pol);
+        if (!fs.ok) return (false, false, 0, 0);
+        if (!fs.up) return (true, true, fs.startedAt, now_());
         (bool ok2, bytes memory ret2) = pol.sequencerFeed().staticcall(
             abi.encodeWithSignature("getRoundData(uint80)", fs.answeredInRound - 1)
         );
-        if (!ok2 || ret2.length != 160) return (false, 0, 0);
-        (, int256 prevAns, uint256 prevStart,,) = abi.decode(ret2, (uint80, int256, uint256, uint256, uint80));
-        if (prevAns != 1) return (false, 0, 0);
-        return (true, uint64(prevStart), uint64(fs.startedAt));
+        if (!ok2 || ret2.length != 160) return (false, false, 0, 0);
+        (uint80 prid, int256 pans, uint256 pstart,, uint80 pair) =
+            abi.decode(ret2, (uint80, int256, uint256, uint256, uint80));
+        if (pans == 0 && pstart == 0) return (true, false, 0, 0);
+        if (pstart == 0 || pstart > fs.startedAt) return (false, false, 0, 0);
+        if (pair != 0 && pair != prid) return (false, false, 0, 0);
+        if (pans != 1) return (true, false, 0, 0);
+        return (true, true, uint64(pstart), fs.startedAt);
     }
 
-    function graceOf(MidmanPolicies pol, bytes32 outagePolicyId) internal view returns (uint32 grace, uint8 maxIntervals) {
-        (bool exists,, uint32 g, uint8 m) = pol.outagePolicies(outagePolicyId);
+    function graceOf(MidmanPolicies pol, bytes32 outagePolicyId) internal view returns (uint32 grace) {
+        (bool exists,, uint32 g,) = pol.outagePolicies(outagePolicyId);
         require(exists, BadTerms());
-        return (g, m);
+        return g;
     }
 
-    function effectiveDeadline(MidmanPolicies pol, uint64 anchor, uint64 original, uint32 grace, uint8 maxIntervals)
+    /// @notice Least fixpoint of E = D0 + downtime(A,E) + grace(A,E) over the
+    /// retained ledger merged with the feed's live trailing interval.
+    /// Accelerated iteration: while any intersecting interval is only partially
+    /// covered by E, RHS-E is nondecreasing there, so no fixpoint can lie before
+    /// the nearest such interval's end; jump E to it. Once every intersecting
+    /// interval is fully covered, the equation is exact and one step closes it.
+    /// Converges in at most one pass per interval end; non-convergence within
+    /// MAX_PASSES reports available=false rather than a short deadline.
+    function effectiveDeadline(MidmanPolicies pol, uint64 anchor, uint64 original, uint32 grace)
         internal
         view
-        returns (uint64)
+        returns (uint64 eff, bool available)
     {
-        uint64 windowEnd = original + grace;
-        uint64 extra = 0;
-        (bool hasLive, uint64 ls, uint64 le) = liveTrailing(pol);
-        uint256 total = pol.outageTotal();
-        uint256 retained = pol.outageCount();
-        if (retained > maxIntervals) retained = maxIntervals;
-        if (retained > total) retained = total;
-        for (uint256 k = 0; k < retained; k++) {
-            (uint64 s, uint64 e) = pol.outageRecent(k);
-            if (hasLive && s == ls && e == le) continue; // counted once via live
-            uint64 lo = s > anchor ? s : anchor;
-            uint64 hi = e < windowEnd ? e : windowEnd;
-            if (hi > lo) extra += (hi - lo) + grace;
+        if (pol.outageSaturated()) return (original, false);
+        if (anchor < pol.prunedBefore()) return (original, false);
+
+        uint256 n = pol.outageCount();
+        uint64[] memory starts = new uint64[](n);
+        uint64[] memory ends = new uint64[](n);
+        for (uint256 i = 0; i < n; i++) {
+            (starts[i], ends[i]) = pol.outageAt(i);
         }
+
+        (bool liveOk, bool hasLive, uint64 ls, uint64 le) = liveTrailing(pol);
+        if (!liveOk) return (original, false);
         if (hasLive) {
-            uint64 lo = ls > anchor ? ls : anchor;
-            uint64 hi = le < windowEnd ? le : windowEnd;
-            if (hi > lo) extra += (hi - lo) + grace;
+            for (uint256 i = 0; i < n; i++) {
+                if (starts[i] == ls && ends[i] == le) {
+                    hasLive = false; // counted once via the ledger
+                    break;
+                }
+            }
         }
-        return original + extra;
+
+        uint64 e = original;
+        bool converged = false;
+        for (uint256 pass = 0; pass < MAX_PASSES; pass++) {
+            uint256 dt = 0;
+            uint256 gr = 0;
+            uint64 minPartial = type(uint64).max;
+            bool hasPartial = false;
+            for (uint256 i = 0; i < n; i++) {
+                if (starts[i] >= e || ends[i] <= anchor) continue;
+                uint64 lo = starts[i] > anchor ? starts[i] : anchor;
+                if (ends[i] <= e) {
+                    dt += uint256(ends[i] - lo);
+                } else {
+                    dt += uint256(e - lo);
+                    if (ends[i] < minPartial) minPartial = ends[i];
+                    hasPartial = true;
+                }
+                gr += grace;
+            }
+            if (hasLive && ls < e && le > anchor) {
+                uint64 lo = ls > anchor ? ls : anchor;
+                if (le <= e) {
+                    dt += uint256(le - lo);
+                } else {
+                    dt += uint256(e - lo);
+                    if (le < minPartial) minPartial = le;
+                    hasPartial = true;
+                }
+                gr += grace;
+            }
+            uint256 ne = uint256(original) + dt + gr;
+            if (ne > type(uint64).max) return (original, false);
+            if (ne <= e) {
+                converged = true;
+                break;
+            }
+            if (hasPartial) {
+                // f is monotone and continuous with non-negative slope in
+                // (e, minPartial): no fixpoint can lie before the nearest
+                // partially covered interval end, so advancing there is safe.
+                e = minPartial;
+            } else {
+                e = uint64(ne);
+            }
+        }
+        if (!converged) return (original, false);
+        return (e, true);
     }
 
-    function inspectionEff(HubState storage s, MidmanPolicies pol, bytes32 dealId) internal view returns (uint64) {
+    function inspectionEff(HubState storage s, MidmanPolicies pol, bytes32 dealId)
+        internal
+        view
+        returns (uint64, bool)
+    {
         Deal storage d = s.deals[dealId];
         uint64 orig = d.deliveredAt + d.inspectionPeriod;
-        (uint32 g, uint8 m) = graceOf(pol, d.outagePolicyId);
-        return effectiveDeadline(pol, d.deliveredAt, orig, g, m);
+        return effectiveDeadline(pol, d.deliveredAt, orig, graceOf(pol, d.outagePolicyId));
     }
 
-    function negotiationEff(HubState storage s, MidmanPolicies pol, bytes32 dealId) internal view returns (uint64) {
+    function negotiationEff(HubState storage s, MidmanPolicies pol, bytes32 dealId)
+        internal
+        view
+        returns (uint64, bool)
+    {
         Deal storage d = s.deals[dealId];
         uint64 orig = d.disputeOpenedAt + MidmanDK.SELF_RESOLUTION_SECONDS;
-        (uint32 g, uint8 m) = graceOf(pol, d.outagePolicyId);
-        return effectiveDeadline(pol, d.disputeOpenedAt, orig, g, m);
+        return effectiveDeadline(pol, d.disputeOpenedAt, orig, graceOf(pol, d.outagePolicyId));
     }
 
-    function escalationEff(HubState storage s, MidmanPolicies pol, bytes32 dealId) internal view returns (uint64) {
+    function escalationEff(HubState storage s, MidmanPolicies pol, bytes32 dealId)
+        internal
+        view
+        returns (uint64, bool)
+    {
         Deal storage d = s.deals[dealId];
         uint64 orig = d.disputeOpenedAt + MidmanDK.SELF_RESOLUTION_SECONDS + MidmanDK.ESCALATION_WINDOW_SECONDS;
-        (uint32 g, uint8 m) = graceOf(pol, d.outagePolicyId);
-        return effectiveDeadline(pol, d.disputeOpenedAt, orig, g, m);
+        return effectiveDeadline(pol, d.disputeOpenedAt, orig, graceOf(pol, d.outagePolicyId));
     }
 
-    function evidenceEff(HubState storage s, MidmanPolicies pol, bytes32 dealId) internal view returns (uint64) {
+    function evidenceEff(HubState storage s, MidmanPolicies pol, bytes32 dealId)
+        internal
+        view
+        returns (uint64, bool)
+    {
         Deal storage d = s.deals[dealId];
         uint64 orig = d.escalatedAt + MidmanDK.RESPONDENT_EVIDENCE_SECONDS;
-        (uint32 g, uint8 m) = graceOf(pol, d.outagePolicyId);
-        return effectiveDeadline(pol, d.escalatedAt, orig, g, m);
+        return effectiveDeadline(pol, d.escalatedAt, orig, graceOf(pol, d.outagePolicyId));
     }
 
-    function primaryEff(HubState storage s, MidmanPolicies pol, bytes32 dealId) internal view returns (uint64) {
+    function primaryEff(HubState storage s, MidmanPolicies pol, bytes32 dealId)
+        internal
+        view
+        returns (uint64, bool)
+    {
         // The primary review window gets its own outage adjustment anchored
         // at the (already adjusted) evidence end: downtime during review
         // extends review, exactly like every other adjustable clock.
-        uint64 evEnd = evidenceEff(s, pol, dealId);
+        (uint64 evEnd, bool av) = evidenceEff(s, pol, dealId);
+        if (!av) return (0, false);
         uint64 orig = evEnd + uint64(MidmanDK.PRIMARY_REVIEW_SECONDS);
-        (uint32 g, uint8 m) = graceOf(pol, s.deals[dealId].outagePolicyId);
-        return effectiveDeadline(pol, evEnd, orig, g, m);
+        return effectiveDeadline(pol, evEnd, orig, graceOf(pol, s.deals[dealId].outagePolicyId));
     }
 
-    function fallbackEff(HubState storage s, MidmanPolicies pol, bytes32 dealId) internal view returns (uint64) {
+    function fallbackEff(HubState storage s, MidmanPolicies pol, bytes32 dealId)
+        internal
+        view
+        returns (uint64, bool)
+    {
         Deal storage d = s.deals[dealId];
         uint64 orig = d.fallbackStartedAt + uint64(MidmanDK.FALLBACK_REVIEW_SECONDS);
-        (uint32 g, uint8 m) = graceOf(pol, d.outagePolicyId);
-        return effectiveDeadline(pol, d.fallbackStartedAt, orig, g, m);
+        return effectiveDeadline(pol, d.fallbackStartedAt, orig, graceOf(pol, d.outagePolicyId));
     }
 
     function cutoffOf(Deal storage d) internal view returns (uint64) {
         return d.disputeOpenedAt + uint64(MidmanDK.CATASTROPHIC_ESCAPE_SECONDS);
+    }
+
+    /// @notice Authoritative outage-adjusted deadline view for every anchored
+    /// clock. `available` is false if any required ledger history or feed read
+    /// is missing/malformed. escapeAt is intentionally NOT part of this view:
+    /// it stays the fixed disputeOpenedAt + 5,184,000 cutoff.
+    function effectiveDeadlines(HubState storage s, MidmanPolicies pol, bytes32 dealId)
+        external
+        view
+        returns (
+            uint64 delivery,
+            uint64 inspection,
+            uint64 negotiation,
+            uint64 escalation,
+            uint64 evidence,
+            uint64 primary,
+            uint64 fallbackEnd,
+            bool available
+        )
+    {
+        Deal storage d = s.deals[dealId];
+        bool av;
+        (delivery, av) = deliveryEff(s, pol, dealId);
+        available = av;
+        // A clock only gates the aggregate availability once it has started;
+        // not-yet-started anchors report their nominal duration.
+        (inspection, av) = inspectionEff(s, pol, dealId);
+        if (d.deliveredAt != 0) available = available && av;
+        (negotiation, av) = negotiationEff(s, pol, dealId);
+        if (d.disputeOpenedAt != 0) available = available && av;
+        (escalation, av) = escalationEff(s, pol, dealId);
+        if (d.disputeOpenedAt != 0) available = available && av;
+        (evidence, av) = evidenceEff(s, pol, dealId);
+        if (d.escalatedAt != 0) available = available && av;
+        (primary, av) = primaryEff(s, pol, dealId);
+        if (d.escalatedAt != 0) available = available && av;
+        (fallbackEnd, av) = fallbackEff(s, pol, dealId);
+        if (d.fallbackStartedAt != 0) available = available && av;
     }
 
     /// @notice Permissionless materialization of derived phases. Never extends
@@ -269,25 +411,26 @@ library HubDispute {
         if (!d.funded || d.phase == MidmanDK.PH_SETTLED) return;
         if (!feedUp(pol)) return;
         uint64 t = now_();
-        if (d.phase == MidmanDK.PH_SELF_RESOLUTION && t >= negotiationEff(s, pol, dealId)) {
-            transition(s, dealId, MidmanDK.PH_AWAITING_ESCALATION);
+        if (d.phase == MidmanDK.PH_SELF_RESOLUTION) {
+            (uint64 ne, bool av) = negotiationEff(s, pol, dealId);
+            if (av && t >= ne) transition(s, dealId, MidmanDK.PH_AWAITING_ESCALATION);
         }
         if (d.phase == MidmanDK.PH_EVIDENCE) {
+            (uint64 ee, bool av) = evidenceEff(s, pol, dealId);
             uint64 cutoff = cutoffOf(d);
-            if (t >= evidenceEff(s, pol, dealId) && t < cutoff) {
-                transition(s, dealId, MidmanDK.PH_PRIMARY_REVIEW);
-            }
+            if (av && t >= ee && t < cutoff) transition(s, dealId, MidmanDK.PH_PRIMARY_REVIEW);
         }
         if (d.phase == MidmanDK.PH_PRIMARY_REVIEW && !d.rulingQueued) {
+            (uint64 pEnd, bool av) = primaryEff(s, pol, dealId);
             uint64 cutoff = cutoffOf(d);
-            uint64 pEnd = primaryEff(s, pol, dealId);
-            if (t >= pEnd && t < cutoff) {
+            if (av && t >= pEnd && t < cutoff) {
                 d.fallbackStartedAt = pEnd;
                 transition(s, dealId, MidmanDK.PH_FALLBACK_REVIEW);
             }
         }
-        if (d.phase == MidmanDK.PH_FALLBACK_REVIEW && !d.rulingQueued && t >= fallbackEff(s, pol, dealId)) {
-            transition(s, dealId, MidmanDK.PH_DEADLOCK);
+        if (d.phase == MidmanDK.PH_FALLBACK_REVIEW && !d.rulingQueued) {
+            (uint64 fe, bool av) = fallbackEff(s, pol, dealId);
+            if (av && t >= fe) transition(s, dealId, MidmanDK.PH_DEADLOCK);
         }
     }
 
@@ -377,7 +520,12 @@ library HubDispute {
         normalize(s, pol, dealId);
         require(d.phase == MidmanDK.PH_DELIVERED, BadPhase());
         require(!d.disputeUsed, DisputeExhausted());
-        require(now_() < inspectionEff(s, pol, dealId), TooLate()); // same rule as timeout; fail-open
+        {
+            // Admission is fail-open: if history/feed is unavailable, admit
+            // against the ORIGINAL inspection deadline, never a shortened one.
+            (uint64 eff, bool av) = inspectionEff(s, pol, dealId);
+            require(now_() < (av ? eff : d.deliveredAt + d.inspectionPeriod), TooLate());
+        }
         bytes32 structHash = keccak256(
             abi.encode(
                 MidmanDK.DISPUTE_TYPEHASH, dealId, d.termsHash, d.buyer, reasonCode, initialCommitment, nonce, expiresAt
@@ -395,7 +543,9 @@ library HubDispute {
         Deal storage d = active(s, dealId);
         require(d.phase == MidmanDK.PH_SELF_RESOLUTION, BadPhase());
         requireFeed(pol);
-        require(now_() >= negotiationEff(s, pol, dealId), TooEarly());
+        (uint64 ne, bool av) = negotiationEff(s, pol, dealId);
+        require(av, OutageUnknown());
+        require(now_() >= ne, TooEarly());
         transition(s, dealId, MidmanDK.PH_AWAITING_ESCALATION);
     }
 
@@ -420,7 +570,12 @@ library HubDispute {
             d.phase == MidmanDK.PH_SELF_RESOLUTION || d.phase == MidmanDK.PH_AWAITING_ESCALATION, BadPhase()
         );
         uint64 cutoff = cutoffOf(d);
-        require(now_() >= negotiationEff(s, pol, dealId) && now_() < escalationEff(s, pol, dealId) && now_() < cutoff, BadPhase());
+        {
+            (uint64 ne, bool avN) = negotiationEff(s, pol, dealId);
+            (uint64 ee, bool avE) = escalationEff(s, pol, dealId);
+            require(avN && avE, OutageUnknown());
+            require(now_() >= ne && now_() < ee && now_() < cutoff, BadPhase());
+        }
         (, , uint256 requiredClaimant,) = pol.bondPolicies(d.bondPolicyId);
         require(collateralAmount == requiredClaimant && collateralAmount >= Finance.MIN_BOND, BadTerms());
         if (!(msg.sender == d.buyer && collateralSource == 0 && sig.length == 0)) {
@@ -509,7 +664,9 @@ library HubDispute {
             d.phase == MidmanDK.PH_SELF_RESOLUTION || d.phase == MidmanDK.PH_AWAITING_ESCALATION, BadPhase()
         );
         requireFeed(pol);
-        require(now_() >= escalationEff(s, pol, dealId), TooEarly());
+        (uint64 ee, bool av) = escalationEff(s, pol, dealId);
+        require(av, OutageUnknown());
+        require(now_() >= ee, TooEarly());
         transition(s, dealId, MidmanDK.PH_DELIVERED); // anchor preserved; disputeUsed stays true
         emit DisputeLapsed(dealId);
     }
@@ -533,7 +690,11 @@ library HubDispute {
         normalize(s, pol, dealId);
         require(d.phase == MidmanDK.PH_EVIDENCE, BadPhase());
         uint64 cutoff = cutoffOf(d);
-        require(now_() < evidenceEff(s, pol, dealId) && now_() < cutoff, BadPhase());
+        {
+            (uint64 ee, bool av) = evidenceEff(s, pol, dealId);
+            require(av, OutageUnknown());
+            require(now_() < ee && now_() < cutoff, BadPhase());
+        }
         require(d.respondentBond == 0, BadTerms());
         (, , , uint256 requiredRespondent) = pol.bondPolicies(d.bondPolicyId);
         require(amount == requiredRespondent && amount >= Finance.MIN_BOND, BadTerms());
@@ -586,7 +747,11 @@ library HubDispute {
         normalize(s, pol, dealId);
         require(d.phase == MidmanDK.PH_EVIDENCE, BadPhase());
         uint64 cutoff = cutoffOf(d);
-        require(now_() < evidenceEff(s, pol, dealId) && now_() < cutoff, BadPhase());
+        {
+            (uint64 ee, bool av) = evidenceEff(s, pol, dealId);
+            require(av, OutageUnknown());
+            require(now_() < ee && now_() < cutoff, BadPhase());
+        }
         require(uploader == d.buyer || uploader == d.seller, BadTerms());
         require(d.claimantBond > 0, BadPhase());
         require(sequence == d.manifestCount && prevCommitment == d.manifestHead, BadNonce());
@@ -621,7 +786,11 @@ library HubDispute {
         require(d.phase == MidmanDK.PH_EVIDENCE, BadPhase());
         requireFeed(pol);
         uint64 cutoff = cutoffOf(d);
-        require(now_() >= evidenceEff(s, pol, dealId) && now_() < cutoff, BadPhase());
+        {
+            (uint64 ee, bool av) = evidenceEff(s, pol, dealId);
+            require(av, OutageUnknown());
+            require(now_() >= ee && now_() < cutoff, BadPhase());
+        }
         transition(s, dealId, MidmanDK.PH_PRIMARY_REVIEW);
     }
 
@@ -632,7 +801,8 @@ library HubDispute {
         require(d.phase == MidmanDK.PH_PRIMARY_REVIEW && !d.rulingQueued, BadPhase());
         requireFeed(pol);
         uint64 cutoff = cutoffOf(d);
-        uint64 pEnd = primaryEff(s, pol, dealId);
+        (uint64 pEnd, bool av) = primaryEff(s, pol, dealId);
+        require(av, OutageUnknown());
         require(now_() >= pEnd && now_() < cutoff, BadPhase());
         d.fallbackStartedAt = pEnd;
         transition(s, dealId, MidmanDK.PH_FALLBACK_REVIEW);
@@ -651,11 +821,15 @@ library HubDispute {
         uint8 quorum;
         if (r.origin == MidmanDK.ORIGIN_PRIMARY) {
             require(d.phase == MidmanDK.PH_PRIMARY_REVIEW, BadPhase());
-            require(now_() < primaryEff(s, pol, dealId) && now_() < cutoff, BadPhase());
+            (uint64 pEnd, bool av) = primaryEff(s, pol, dealId);
+            require(av, OutageUnknown());
+            require(now_() < pEnd && now_() < cutoff, BadPhase());
             quorum = d.primaryQuorum;
         } else if (r.origin == MidmanDK.ORIGIN_FALLBACK) {
             require(d.phase == MidmanDK.PH_FALLBACK_REVIEW, BadPhase());
-            require(now_() < fallbackEff(s, pol, dealId) && now_() < cutoff, BadPhase());
+            (uint64 fEnd, bool av) = fallbackEff(s, pol, dealId);
+            require(av, OutageUnknown());
+            require(now_() < fEnd && now_() < cutoff, BadPhase());
             quorum = d.fallbackQuorum;
         } else {
             revert BadAward();
@@ -769,7 +943,10 @@ library HubDispute {
             d.fallbackStartedAt = now_();
             transition(s, dealId, MidmanDK.PH_FALLBACK_REVIEW);
         } else {
-            if (now_() >= fallbackEff(s, pol, dealId)) transition(s, dealId, MidmanDK.PH_DEADLOCK);
+            // Cancel-only path: if history is unavailable, keep the clock open
+            // in fallback review rather than reverting or forcing deadlock.
+            (uint64 fe, bool av) = fallbackEff(s, pol, dealId);
+            if (av && now_() >= fe) transition(s, dealId, MidmanDK.PH_DEADLOCK);
             else transition(s, dealId, MidmanDK.PH_FALLBACK_REVIEW);
         }
         emit RulingVetoed(dealId, origin);
@@ -792,16 +969,21 @@ library HubDispute {
         if (d.phase == MidmanDK.PH_DEADLOCK) return; // already materialized
         require(d.phase == MidmanDK.PH_FALLBACK_REVIEW && !d.rulingQueued, BadPhase());
         requireFeed(pol);
-        require(now_() >= fallbackEff(s, pol, dealId), TooEarly());
+        (uint64 fe, bool av) = fallbackEff(s, pol, dealId);
+        require(av, OutageUnknown());
+        require(now_() >= fe, TooEarly());
         transition(s, dealId, MidmanDK.PH_DEADLOCK);
         emit DeadlockMarked(dealId);
     }
 
-    function deliveryEff(HubState storage s, MidmanPolicies pol, bytes32 dealId) internal view returns (uint64) {
+    function deliveryEff(HubState storage s, MidmanPolicies pol, bytes32 dealId)
+        internal
+        view
+        returns (uint64, bool)
+    {
         Deal storage d = s.deals[dealId];
         uint64 orig = d.fundedAt + d.deliveryPeriod;
-        (uint32 g, uint8 m) = graceOf(pol, d.outagePolicyId);
-        return effectiveDeadline(pol, d.fundedAt, orig, g, m);
+        return effectiveDeadline(pol, d.fundedAt, orig, graceOf(pol, d.outagePolicyId));
     }
 
     // ================= T03 markDelivered (L-NONE) =================
@@ -818,7 +1000,11 @@ library HubDispute {
         Deal storage d = active(s, dealId);
         normalize(s, pol, dealId);
         require(d.phase == MidmanDK.PH_AWAITING_DELIVERY, BadPhase());
-        require(now_() < deliveryEff(s, pol, dealId), TooLate());
+        {
+            (uint64 de, bool av) = deliveryEff(s, pol, dealId);
+            require(av, OutageUnknown());
+            require(now_() < de, TooLate());
+        }
         require(manifestHash != bytes32(0), BadTerms());
         bytes32 structHash = keccak256(
             abi.encode(MidmanDK.DELIVER_TYPEHASH, dealId, d.termsHash, d.seller, manifestHash, nonce, expiresAt)
@@ -836,7 +1022,9 @@ library HubDispute {
         normalize(s, pol, dealId);
         require(d.phase == MidmanDK.PH_AWAITING_DELIVERY, BadPhase());
         requireFeed(pol);
-        require(now_() >= deliveryEff(s, pol, dealId), TooEarly());
+        (uint64 de, bool av) = deliveryEff(s, pol, dealId);
+        require(av, OutageUnknown());
+        require(now_() >= de, TooEarly());
         settleNormal(s, dealId, 0, 0, 0, MidmanDK.OUT_NON_DELIVERY);
     }
 
@@ -932,7 +1120,9 @@ library HubDispute {
         normalize(s, pol, dealId);
         require(d.phase == MidmanDK.PH_DELIVERED, BadPhase());
         requireFeed(pol);
-        require(now_() >= inspectionEff(s, pol, dealId), TooEarly());
+        (uint64 ie, bool av) = inspectionEff(s, pol, dealId);
+        require(av, OutageUnknown());
+        require(now_() >= ie, TooEarly());
         settleNormal(s, dealId, d.principal, 0, 0, MidmanDK.OUT_TIMEOUT);
     }
 

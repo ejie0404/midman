@@ -56,7 +56,13 @@ const MIGRATIONS = [
 describe("defaultMigrations", () => {
   it("lists the ordered migration set including evidence", () => {
     const ids = defaultMigrations().map((migration) => migration.id);
-    assert.deepEqual(ids, ["0001_init", "0002_phase6", "0003_evidence", "0004_migrations"]);
+    assert.deepEqual(ids, [
+      "0001_init",
+      "0002_phase6",
+      "0003_evidence",
+      "0004_migrations",
+      "0005_durability",
+    ]);
   });
 
   it("embeds non-empty SQL for every migration", () => {
@@ -131,7 +137,13 @@ describe("runMigrations", () => {
   it("accepts the embedded default set", async () => {
     const db = new MigrateFake();
     const applied = await runMigrations(db);
-    assert.deepEqual(applied, ["0001_init", "0002_phase6", "0003_evidence", "0004_migrations"]);
+    assert.deepEqual(applied, [
+      "0001_init",
+      "0002_phase6",
+      "0003_evidence",
+      "0004_migrations",
+      "0005_durability",
+    ]);
   });
 
   it("optional integration: real Postgres when DATABASE_URL is set", { skip: !process.env.DATABASE_URL }, async () => {

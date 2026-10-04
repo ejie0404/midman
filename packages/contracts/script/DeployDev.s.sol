@@ -45,6 +45,10 @@ abstract contract DeployDevBase {
     address internal constant ANVIL_7 = 0x14dC79964da2C08b23698B3D3cc7Ca32193d9955;
     address internal constant ANVIL_8 = 0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f;
     address internal constant ANVIL_9 = 0xa0Ee7A142d267C1f36714E4a8F75612F20a79720;
+    address internal constant ANVIL_10 = 0xBcd4042DE499D14e55001CcbB24a551F3b954096;
+    address internal constant ANVIL_11 = 0x71bE63f3384f5fb98995898A86B02Fb2426c5788;
+    address internal constant ANVIL_12 = 0xFABB0ac9d68B0B445fB7357272Ff202C5651694a;
+    address internal constant ANVIL_13 = 0x1CBd3b2770909D4e10f157cABC84C7264073C9Ec;
 
     // Canonical policy content hashes, identical to deploy/manifest.example.json
     // (keccak256 of the canonical deploy/policies/*.json records).
@@ -74,24 +78,28 @@ abstract contract DeployDevBase {
         address hub;
     }
 
-    /// @notice Deterministic 3/3/3 anvil panels reused by the script and tests.
+    /// @notice Deterministic 5/5/3 anvil panels reused by the script and tests.
     function devPanelAddresses()
         internal
         pure
         returns (address[] memory primary, address[] memory fallbackPanel, address[] memory veto)
     {
-        primary = new address[](3);
-        fallbackPanel = new address[](3);
+        primary = new address[](5);
+        fallbackPanel = new address[](5);
         veto = new address[](3);
         primary[0] = ANVIL_1;
         primary[1] = ANVIL_2;
         primary[2] = ANVIL_3;
-        fallbackPanel[0] = ANVIL_4;
-        fallbackPanel[1] = ANVIL_5;
-        fallbackPanel[2] = ANVIL_6;
-        veto[0] = ANVIL_7;
-        veto[1] = ANVIL_8;
-        veto[2] = ANVIL_9;
+        primary[3] = ANVIL_4;
+        primary[4] = ANVIL_5;
+        fallbackPanel[0] = ANVIL_6;
+        fallbackPanel[1] = ANVIL_7;
+        fallbackPanel[2] = ANVIL_8;
+        fallbackPanel[3] = ANVIL_9;
+        fallbackPanel[4] = ANVIL_10;
+        veto[0] = ANVIL_11;
+        veto[1] = ANVIL_12;
+        veto[2] = ANVIL_13;
     }
 
     function _deployDev(DevConfig memory c) internal returns (DevDeployment memory out) {
@@ -156,7 +164,11 @@ contract DeployDev is Script, DeployDevBase {
         console.log("TREASURY:", c.treasury);
         for (uint256 i = 0; i < primary.length; i++) {
             console.log(string.concat("PRIMARY_", vm.toString(i), ":"), primary[i]);
+        }
+        for (uint256 i = 0; i < fallbackPanel.length; i++) {
             console.log(string.concat("FALLBACK_", vm.toString(i), ":"), fallbackPanel[i]);
+        }
+        for (uint256 i = 0; i < veto.length; i++) {
             console.log(string.concat("VETO_", vm.toString(i), ":"), veto[i]);
         }
         console.log("POLICIES_CODEHASH:");

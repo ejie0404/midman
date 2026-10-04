@@ -173,19 +173,19 @@ contract AdversarialTest is MidmanHubTest {
         uint64 escAt = _escalated(t, openedAt);
         vm.warp(escAt + 86_400 + 1);
         hub.advanceToPrimary(t.dealId);
-        // Rotate to fresh disjoint panels.
-        address[] memory np = new address[](3);
-        address[] memory nf = new address[](3);
+        // Rotate to fresh disjoint 5/5/3 panels.
+        address[] memory np = new address[](5);
+        address[] memory nf = new address[](5);
         address[] memory nv = new address[](3);
-        uint256[] memory npk = new uint256[](3);
-        uint256[] memory nfk = new uint256[](3);
-        for (uint256 i = 0; i < 3; i++) {
+        uint256[] memory npk = new uint256[](5);
+        uint256[] memory nfk = new uint256[](5);
+        for (uint256 i = 0; i < 5; i++) {
             npk[i] = 0xB001 + i;
             nfk[i] = 0xC001 + i;
             np[i] = vm.addr(npk[i]);
             nf[i] = vm.addr(nfk[i]);
-            nv[i] = vm.addr(vetoPks[i]);
         }
+        for (uint256 i = 0; i < 3; i++) nv[i] = vm.addr(vetoPks[i]);
         vm.prank(governance);
         policies.proposePanel(np, nf, nv);
         vm.warp(block.timestamp + 72 hours + 1);
@@ -224,14 +224,14 @@ contract AdversarialTest is MidmanHubTest {
         vm.warp(escAt + 86_400 + 1);
         hub.advanceToPrimary(t.dealId);
         _queueFullSellerPrimary(t, keccak256("q-survive"), 1, primaryPks);
-        address[] memory np = new address[](3);
-        address[] memory nf = new address[](3);
+        address[] memory np = new address[](5);
+        address[] memory nf = new address[](5);
         address[] memory nv = new address[](3);
-        for (uint256 i = 0; i < 3; i++) {
+        for (uint256 i = 0; i < 5; i++) {
             np[i] = vm.addr(0xD001 + i);
             nf[i] = vm.addr(0xE001 + i);
-            nv[i] = vm.addr(vetoPks[i]);
         }
+        for (uint256 i = 0; i < 3; i++) nv[i] = vm.addr(vetoPks[i]);
         vm.prank(governance);
         policies.proposePanel(np, nf, nv);
         vm.warp(block.timestamp + 72 hours + 1);
@@ -298,7 +298,6 @@ contract AdversarialTest is MidmanHubTest {
         vm.warp(t0 + 5_000 + 1);
         policies.reportOutage(7);
         // Original end (t0+3600) passed, but effective end includes 4000s + 1800s grace.
-        vm.warp(t0 + 3_600 + 100);
         _deliver(t.dealId);
     }
 
@@ -398,9 +397,9 @@ contract AdversarialTest is MidmanHubTest {
     // ---- Outage engine regressions: newest-wins reads, O+grace clipping,
     // primary-window coverage, unreported trailing outages, ring capacity ----
 
-    /// @notice With 10 recorded outages and an 8-interval lookback, the newest
-    /// (overlapping) outage must still extend the deadline.
-    function testNewestOutageEntriesCount() public {
+    /// @notice Historical retained intervals before the anchor never mask a
+    /// fresh overlapping interval: every retained interval is summed.
+    function testAllRetainedIntervalsCount() public {
         uint64 t0 = uint64(block.timestamp);
         for (uint80 r = 10; r < 28; r += 2) {
             uint64 s = t0 - 200_000 + uint64(r - 10) * 1_000;
@@ -418,17 +417,19 @@ contract AdversarialTest is MidmanHubTest {
         policies.reportOutage(28);
         // Seal the feed so no live trailing interval interferes.
         feed.programUpRound(30, fundedAt + 2_000 + 1);
-        (uint64 rs, uint64 re) = policies.outageRecent(0);
+        assertEq(policies.outageCount(), 10);
+        (uint64 rs, uint64 re) = policies.outageAt(9);
         assertEq(rs, fundedAt + 1_000);
         assertEq(re, fundedAt + 2_000);
-        // Original end fundedAt+3600 passed; 1000 overlap + 1800 grace applies.
+        // Original end fundedAt+3600 passed; 1000 downtime + 1800 grace applies.
         vm.warp(fundedAt + 3_600 + 500);
         _deliver(t.dealId);
     }
 
-    /// @notice An outage running past the deadline extends to original+grace
-    /// (P-09 window), not just to the original deadline.
-    function testOutageClipsAtOriginalPlusGrace() public {
+    /// @notice An outage that crosses the original deadline preserves ALL of
+    /// its downtime (not just up to the original + grace clip): the fixpoint
+    /// iterates until the whole connected outage is covered.
+    function testOutageCrossingOriginalContinues() public {
         DealTerms memory t = _terms(P, 10_000);
         _fund(t, false);
         uint64 fundedAt = hub.getDeal(t.dealId).fundedAt;
@@ -437,40 +438,33 @@ contract AdversarialTest is MidmanHubTest {
         vm.warp(origEnd + 5_000 + 1);
         policies.reportOutage(40);
         feed.programUpRound(42, origEnd + 5_000 + 1);
-        // Overlap with [fundedAt, origEnd+1800]: 100 + 1800 = 1900;
-        // extension 1900 + 1800 = 3700. eff = origEnd + 3700.
-        vm.warp(origEnd + 3_700);
+        // Downtime 5,100 + grace 1,800 = 6,900 extension. eff = origEnd + 6,900.
+        vm.warp(origEnd + 6_900);
         vm.prank(seller);
         vm.expectRevert(TooLate.selector);
         hub.markDelivered(t.dealId, keccak256("m"), bytes32(0), 0, new bytes(0));
-        vm.warp(origEnd + 3_700 - 1);
+        vm.warp(origEnd + 6_900 - 1);
         _deliver(t.dealId);
     }
 
-    /// @notice Downtime during primary review extends the primary deadline.
-    function testPrimaryReviewWindowExtends() public {
+    /// @notice The primary window is anchored on the (already outage-adjusted)
+    /// evidence end, so downtime that shifted evidence also shifts primary.
+    function testPrimaryWindowFollowsExtendedEvidence() public {
         (DealTerms memory t, uint64 openedAt) = _disputed(P, 10_000);
         uint64 escAt = _escalated(t, openedAt);
         uint64 evEnd = escAt + 86_400;
-        uint64 pEnd = evEnd + 7 days;
-        feed.programOutage(50, evEnd + 1_000, evEnd + 2_000);
-        vm.warp(evEnd + 2_000 + 1);
+        feed.programOutage(50, evEnd - 2_000, evEnd + 4_000);
+        vm.warp(evEnd + 4_000 + 1);
         policies.reportOutage(50);
-        feed.programUpRound(52, evEnd + 2_000 + 1);
-        // Past the original primary end but inside the extended window
-        // (outage overlaps the evidence grace tail, shifting the evidence
-        // anchor +2600; the primary window itself starts after recovery, so
-        // it adds nothing further): eff = pEnd + 2600.
-        vm.warp(pEnd + 1);
-        vm.expectRevert(BadPhase.selector);
-        hub.activateFallback(t.dealId);
-        vm.warp(pEnd + 2_599);
-        vm.expectRevert(BadPhase.selector);
-        hub.activateFallback(t.dealId);
-        // Exact extended edge: materializes via normalization.
-        vm.warp(pEnd + 2_600);
-        hub.activateFallback(t.dealId);
-        assertTrue(hub.getDeal(t.dealId).phase == 6);
+        feed.programUpRound(52, evEnd + 4_000 + 1);
+        // downtime 6,000 + grace 1,800 = 7,800.
+        uint64 evEndEff = evEnd + 7_800;
+        (,,,,, uint64 primary, , bool av) = hub.effectiveDeadlines(t.dealId);
+        assertTrue(av, "available");
+        assertEq(primary, evEndEff + 7 days, "primary anchored on adjusted evidence end");
+        vm.warp(evEndEff);
+        hub.advanceToPrimary(t.dealId);
+        assertEq(hub.getDeal(t.dealId).phase, 5);
     }
 
     /// @notice An outage that ended but was never reported still counts via
@@ -492,21 +486,33 @@ contract AdversarialTest is MidmanHubTest {
         hub.openDispute(t.dealId, 1, bytes32(0), bytes32(0), 0, new bytes(0));
     }
 
-    /// @notice Reporting never bricks: past 64 entries the oldest is evicted.
-    function testOutageLedgerRingsPastCapacity() public {
-        uint64 t0 = uint64(block.timestamp);
-        for (uint80 r = 100; r < 230; r += 2) {
-            uint64 s = t0 + uint64(r - 100) * 1_000;
-            feed.programOutage(r, s, s + 100);
-            vm.warp(s + 100 + 1);
-            policies.reportOutage(r);
-        }
-        assertEq(policies.outageTotal(), 65);
-        assertEq(policies.outageCount(), 64);
-        (uint64 ns, uint64 ne) = policies.outageRecent(0);
-        assertEq(ns, t0 + 128_000);
-        assertEq(ne, t0 + 128_100);
-        (uint64 os,) = policies.outages(0);
-        assertEq(os, t0 + 2_000); // r=100 evicted; r=102 is oldest retained
+    /// @notice Absolute-age pruning drops only intervals older than
+    /// MAX_HISTORY_AGE and advances `prunedBefore`; a clock anchored before it
+    /// is reported UNKNOWN, never silently shortened.
+    function testOutageAgePruningMarksUnavailable() public {
+        DealTerms memory t = _terms(P, 10_000);
+        _fund(t, false);
+        _deliver(t.dealId);
+        uint64 deliveredAt = hub.getDeal(t.dealId).deliveredAt;
+        // A recent interval is retained.
+        feed.programOutage(100, deliveredAt + 10, deliveredAt + 20);
+        vm.warp(deliveredAt + 21);
+        policies.reportOutage(100);
+        assertEq(policies.outageCount(), 1);
+
+        // Age it far past MAX_HISTORY_AGE, then report a fresh interval which
+        // prunes the old one by absolute age only.
+        vm.warp(deliveredAt + policies.MAX_HISTORY_AGE() + 1 days);
+        uint64 nowTs = uint64(block.timestamp);
+        feed.programOutage(102, nowTs - 10, nowTs);
+        vm.warp(nowTs + 1);
+        policies.reportOutage(102);
+        assertEq(policies.outageCount(), 1, "old interval pruned");
+        assertGe(policies.prunedBefore(), deliveredAt + 20, "prunedBefore advanced");
+
+        (,,,,, , , bool av) = hub.effectiveDeadlines(t.dealId);
+        assertFalse(av, "history before anchor is unavailable");
+        vm.expectRevert(OutageUnknown.selector);
+        hub.finalizeAfterTimeout(t.dealId);
     }
 }

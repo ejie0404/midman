@@ -2,7 +2,19 @@
 // parameter and never interpolated into SQL. Money and hashes stay exact
 // strings (TEXT/NUMERIC) so no JavaScript float is ever introduced; block
 // numbers travel as decimal strings and are returned as bigint.
-import type { ChainEventRow, DraftRecord, IndexerTip, RelayJob, Store } from "./store.js";
+import {
+  ConflictError,
+  type AuthStateEntry,
+  type ChainEventRow,
+  type DealMetaRecord,
+  type DraftRecord,
+  type IndexerTip,
+  type InvitationRecord,
+  type KvEntry,
+  type RelayJob,
+  type Store,
+  type VersionedValue,
+} from "./store.js";
 import type { SqlExecutor } from "./sql.js";
 
 const DRAFT_COLUMNS: Record<string, string> = {
@@ -35,6 +47,7 @@ interface DraftRow {
   admission: Record<string, string> | null;
   revocation_note: Record<string, string> | null;
   status: string;
+  version?: number | string;
 }
 
 function toDraft(row: DraftRow): DraftRecord {
@@ -49,7 +62,22 @@ function toDraft(row: DraftRow): DraftRecord {
     admission: row.admission,
     revocationNote: row.revocation_note,
     status: row.status,
+    version: Number(row.version ?? 0),
   };
+}
+
+/** Build the SET list for a draft patch (excluding id). */
+function draftPatch(patch: Partial<DraftRecord>): { sets: string[]; values: unknown[] } {
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  for (const [field, value] of Object.entries(patch)) {
+    if (value === undefined) continue;
+    const column = DRAFT_COLUMNS[field];
+    if (column === undefined) continue;
+    values.push(JSON_DRAFT_COLUMNS.has(field) ? jsonParam(value) : value);
+    sets.push(`${column} = $${values.length + 1}`);
+  }
+  return { sets, values };
 }
 
 interface ChainEventDbRow {
@@ -87,6 +115,14 @@ interface RelayDbRow {
   attempts: number;
   tx_hash: string | null;
   result: Record<string, unknown> | null;
+  lease_owner?: string | null;
+  lease_expires_at?: string | Date | null;
+  version?: number | string;
+}
+
+function isoOrNull(value: string | Date | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  return value instanceof Date ? value.toISOString() : value;
 }
 
 function toRelay(row: RelayDbRow): RelayJob {
@@ -99,17 +135,29 @@ function toRelay(row: RelayDbRow): RelayJob {
     attempts: Number(row.attempts),
     txHash: row.tx_hash,
     result: row.result,
+    leaseOwner: row.lease_owner ?? null,
+    leaseExpiresAt: isoOrNull(row.lease_expires_at),
+    version: Number(row.version ?? 0),
   };
 }
 
 export class PgStore implements Store {
   constructor(private readonly db: SqlExecutor) {}
 
+  /** Backing executor (used by migrateStore and for shutdown). */
+  get executor(): SqlExecutor {
+    return this.db;
+  }
+
+  async close(): Promise<void> {
+    if (typeof this.db.close === "function") await this.db.close();
+  }
+
   async createDraft(draft: DraftRecord): Promise<void> {
     await this.db.query(
       `INSERT INTO drafts
-         (id, deal_id, creator_wallet, counterparty_hint, counterparty_address, terms, signatures, admission, revocation_note, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         (id, deal_id, creator_wallet, counterparty_hint, counterparty_address, terms, signatures, admission, revocation_note, status, version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (id) DO UPDATE SET
          deal_id = EXCLUDED.deal_id,
          creator_wallet = EXCLUDED.creator_wallet,
@@ -132,6 +180,7 @@ export class PgStore implements Store {
         jsonParam(draft.admission),
         jsonParam(draft.revocationNote),
         draft.status,
+        draft.version ?? 0,
       ],
     );
   }
@@ -152,18 +201,45 @@ export class PgStore implements Store {
   }
 
   async updateDraft(id: string, patch: Partial<DraftRecord>): Promise<void> {
-    const sets: string[] = [];
-    const params: unknown[] = [id];
-    for (const [field, value] of Object.entries(patch)) {
-      if (value === undefined) continue;
-      const column = DRAFT_COLUMNS[field];
-      if (column === undefined) continue;
-      params.push(JSON_DRAFT_COLUMNS.has(field) ? jsonParam(value) : value);
-      sets.push(`${column} = $${params.length}`);
-    }
+    const { sets, values } = draftPatch(patch);
     if (sets.length === 0) return;
+    sets.push("version = version + 1");
     sets.push("updated_at = now()");
-    await this.db.query(`UPDATE drafts SET ${sets.join(", ")} WHERE id = $1`, params);
+    await this.db.query(`UPDATE drafts SET ${sets.join(", ")} WHERE id = $1`, [id, ...values]);
+  }
+
+  async updateDraftCas(id: string, expectedVersion: number, patch: Partial<DraftRecord>): Promise<number> {
+    const { sets, values } = draftPatch(patch);
+    const params: unknown[] = [id, ...values];
+    sets.push("version = version + 1");
+    sets.push("updated_at = now()");
+    params.push(expectedVersion);
+    const { rows } = await this.db.query<{ version: number | string }>(
+      `UPDATE drafts SET ${sets.join(", ")} WHERE id = $1 AND version = $${params.length} RETURNING version`,
+      params,
+    );
+    if (rows.length === 0) {
+      throw new ConflictError(`Draft ${id} version conflict (expected ${expectedVersion})`);
+    }
+    return Number(rows[0]!.version);
+  }
+
+  async mergeDraftSignature(id: string, role: string, signature: string): Promise<void> {
+    const apply = async (db: SqlExecutor): Promise<void> => {
+      const { rows } = await db.query<DraftRow>("SELECT * FROM drafts WHERE id = $1 FOR UPDATE", [id]);
+      const current = rows[0];
+      if (!current) throw new Error("Draft not found");
+      const signatures = { ...(current.signatures ?? {}), [role]: signature };
+      const status = Object.keys(signatures).length >= 1 ? "signed" : current.status;
+      await db.query(
+        `UPDATE drafts
+         SET signatures = $2::jsonb, status = $3, version = version + 1, updated_at = now()
+         WHERE id = $1`,
+        [id, JSON.stringify(signatures), status],
+      );
+    };
+    if (typeof this.db.withTransaction === "function") await this.db.withTransaction(apply);
+    else await apply(this.db);
   }
 
   async putEvents(events: ChainEventRow[]): Promise<number> {
@@ -205,6 +281,13 @@ export class PgStore implements Store {
          FROM input AS i
          WHERE ce.tx_hash = i.tx_hash AND ce.log_index = i.log_index AND ce.orphaned = true
          RETURNING 1 AS revived
+       ),
+       meta AS (
+         INSERT INTO deals_meta (deal_id, source)
+         SELECT DISTINCT deal_id, 'chain' FROM input
+         WHERE deal_id IS NOT NULL AND orphaned = false
+         ON CONFLICT (deal_id) DO NOTHING
+         RETURNING 1
        )
        SELECT (SELECT count(*)::int FROM inserted) AS inserted`,
       params,
@@ -314,13 +397,58 @@ export class PgStore implements Store {
     // locked for the duration of the transaction/statement.
     const { rows } = await this.db.query<RelayDbRow>(
       `UPDATE relay_outbox
-       SET status = 'processing', attempts = attempts + 1, updated_at = now()
+       SET status = 'processing', attempts = attempts + 1, version = version + 1, updated_at = now()
        WHERE idempotency_key = $1 AND status = 'queued'
        RETURNING *`,
       [key],
     );
     const row = rows[0];
     return row ? toRelay(row) : null;
+  }
+
+  async claimRelayLease(key: string, owner: string, ttlSeconds: number): Promise<RelayJob | null> {
+    const { rows } = await this.db.query<RelayDbRow>(
+      `UPDATE relay_outbox
+       SET status = 'processing',
+           attempts = attempts + 1,
+           lease_owner = $2,
+           lease_expires_at = now() + make_interval(secs => $3::double precision),
+           version = version + 1,
+           updated_at = now()
+       WHERE idempotency_key = $1
+         AND (
+           status = 'queued'
+           OR (status = 'processing' AND (lease_expires_at IS NULL OR lease_expires_at < now()))
+         )
+       RETURNING *`,
+      [key, owner, ttlSeconds],
+    );
+    const row = rows[0];
+    return row ? toRelay(row) : null;
+  }
+
+  async renewRelayLease(key: string, owner: string, ttlSeconds: number): Promise<boolean> {
+    const { rows } = await this.db.query(
+      `UPDATE relay_outbox
+       SET lease_expires_at = now() + make_interval(secs => $3::double precision),
+           version = version + 1,
+           updated_at = now()
+       WHERE idempotency_key = $1 AND lease_owner = $2 AND status = 'processing'
+       RETURNING 1 AS renewed`,
+      [key, owner, ttlSeconds],
+    );
+    return rows.length > 0;
+  }
+
+  async reapExpiredRelayLeases(): Promise<number> {
+    const { rows } = await this.db.query(
+      `UPDATE relay_outbox
+       SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL,
+           version = version + 1, updated_at = now()
+       WHERE status = 'processing' AND lease_expires_at IS NOT NULL AND lease_expires_at < now()
+       RETURNING 1 AS reaped`,
+    );
+    return rows.length;
   }
 
   async finishRelay(
@@ -331,7 +459,8 @@ export class PgStore implements Store {
   ): Promise<void> {
     await this.db.query(
       `UPDATE relay_outbox
-       SET status = $2, tx_hash = $3, result = $4, updated_at = now()
+       SET status = $2, tx_hash = $3, result = $4, lease_owner = NULL, lease_expires_at = NULL,
+           version = version + 1, updated_at = now()
        WHERE idempotency_key = $1`,
       [key, status, txHash, jsonParam(result)],
     );
@@ -363,11 +492,56 @@ export class PgStore implements Store {
     return Number(rows[0]?.n ?? 0);
   }
 
+  async reserveSponsorship(
+    txHash: string,
+    dealId: string | null,
+    action: string,
+    limit: number,
+    sinceIso: string,
+  ): Promise<{ granted: boolean; count: number }> {
+    const apply = async (db: SqlExecutor): Promise<{ granted: boolean; count: number }> => {
+      // Serialize reservations in the same budget window across processes.
+      await db.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`sponsor:${sinceIso}`]);
+      const { rows } = await db.query<{ n: number | string }>(
+        "SELECT COUNT(*)::int AS n FROM sponsor_ledger WHERE created_at >= $1",
+        [sinceIso],
+      );
+      const count = Number(rows[0]?.n ?? 0);
+      if (count >= limit) return { granted: false, count };
+      await db.query("INSERT INTO sponsor_ledger (tx_hash, deal_id, action) VALUES ($1, $2, $3)", [
+        txHash,
+        dealId,
+        action,
+      ]);
+      return { granted: true, count: count + 1 };
+    };
+    if (typeof this.db.withTransaction === "function") return this.db.withTransaction(apply);
+    return apply(this.db);
+  }
+
   async listDealIds(): Promise<string[]> {
+    // Drafts, chain-discovered (externally funded) deals, and registry-known
+    // deals. Distinct + case-insensitive via lower(); deterministic order.
     const { rows } = await this.db.query<{ deal_id: string }>(
-      "SELECT DISTINCT deal_id FROM drafts ORDER BY deal_id ASC",
+      `SELECT DISTINCT deal_id FROM drafts
+       UNION
+       SELECT deal_id FROM chain_events WHERE deal_id IS NOT NULL AND orphaned = false
+       UNION
+       SELECT deal_id FROM registry_kv
+       UNION
+       SELECT deal_id FROM deals_meta
+       ORDER BY deal_id ASC`,
     );
     return rows.map((row) => row.deal_id);
+  }
+
+  async recordDealMeta(dealId: string, source: string): Promise<void> {
+    await this.db.query(
+      `INSERT INTO deals_meta (deal_id, source, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (deal_id) DO UPDATE SET source = EXCLUDED.source, updated_at = now()`,
+      [dealId, source],
+    );
   }
 
   // ---- Registry kv (durable metadata; see registry.ts) ----
@@ -380,7 +554,16 @@ export class PgStore implements Store {
     return rows.length > 0 ? rows[0]!.value : null;
   }
 
-  async kvList(ns: string, dealId: string): Promise<Array<{ key: string; value: unknown }>> {
+  async kvGetWithVersion(ns: string, dealId: string, key: string): Promise<VersionedValue | null> {
+    const { rows } = await this.db.query<{ value: unknown; version: number | string }>(
+      "SELECT value, version FROM registry_kv WHERE ns = $1 AND deal_id = $2 AND key = $3",
+      [ns, dealId, key],
+    );
+    const row = rows[0];
+    return row ? { value: row.value, version: Number(row.version) } : null;
+  }
+
+  async kvList(ns: string, dealId: string): Promise<KvEntry[]> {
     const { rows } = await this.db.query<{ key: string; value: unknown }>(
       "SELECT key, value FROM registry_kv WHERE ns = $1 AND deal_id = $2 ORDER BY key ASC",
       [ns, dealId],
@@ -390,15 +573,36 @@ export class PgStore implements Store {
 
   async kvPut(ns: string, dealId: string, key: string, value: unknown): Promise<void> {
     await this.db.query(
-      `INSERT INTO registry_kv (ns, deal_id, key, value, updated_at)
-       VALUES ($1, $2, $3, $4::jsonb, now())
-       ON CONFLICT (ns, deal_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+      `INSERT INTO registry_kv (deal_id, ns, key, value, version, updated_at)
+       VALUES ($2, $1, $3, $4::jsonb, 1, now())
+       ON CONFLICT (deal_id, ns, key) DO UPDATE SET
+         value = EXCLUDED.value,
+         version = registry_kv.version + 1,
+         updated_at = now()`,
       [ns, dealId, key, JSON.stringify(value)],
     );
   }
 
+  async kvPutCas(ns: string, dealId: string, key: string, value: unknown, expectedVersion: number): Promise<number> {
+    const { rows } = await this.db.query<{ version: number | string }>(
+      `UPDATE registry_kv
+       SET value = $4::jsonb, version = version + 1, updated_at = now()
+       WHERE ns = $1 AND deal_id = $2 AND key = $3 AND version = $5
+       RETURNING version`,
+      [ns, dealId, key, JSON.stringify(value), expectedVersion],
+    );
+    if (rows.length === 0) {
+      throw new ConflictError(`registry_kv conflict for ${ns}/${dealId}/${key} (expected version ${expectedVersion})`);
+    }
+    return Number(rows[0]!.version);
+  }
+
   async kvDelete(ns: string, dealId: string, key: string): Promise<void> {
     await this.db.query("DELETE FROM registry_kv WHERE ns = $1 AND deal_id = $2 AND key = $3", [ns, dealId, key]);
+  }
+
+  async kvDel(ns: string, dealId: string, key: string): Promise<void> {
+    return this.kvDelete(ns, dealId, key);
   }
 
   async kvDeals(ns: string): Promise<string[]> {
@@ -407,6 +611,126 @@ export class PgStore implements Store {
       [ns],
     );
     return rows.map((row) => row.deal_id);
+  }
+
+  // ---- Sequences ----
+  async nextSeq(name: string): Promise<number> {
+    const { rows } = await this.db.query<{ value: number | string }>(
+      `INSERT INTO seq (name, value, updated_at)
+       VALUES ($1, 1, now())
+       ON CONFLICT (name) DO UPDATE SET value = seq.value + 1, updated_at = now()
+       RETURNING value`,
+      [name],
+    );
+    return Number(rows[0]?.value ?? 0);
+  }
+
+  // ---- Auth state ----
+  async authGet(scope: string, key: string): Promise<unknown | null> {
+    const { rows } = await this.db.query<{ value: unknown }>(
+      `SELECT value FROM auth_kv
+       WHERE scope = $1 AND key = $2 AND (expires_at IS NULL OR expires_at > now())`,
+      [scope, key],
+    );
+    return rows.length > 0 ? rows[0]!.value : null;
+  }
+
+  async authPut(scope: string, key: string, value: unknown, expiresAt: string | null = null): Promise<void> {
+    await this.db.query(
+      `INSERT INTO auth_kv (scope, key, value, expires_at, updated_at)
+       VALUES ($1, $2, $3::jsonb, $4, now())
+       ON CONFLICT (scope, key) DO UPDATE SET
+         value = EXCLUDED.value,
+         expires_at = EXCLUDED.expires_at,
+         updated_at = now()`,
+      [scope, key, JSON.stringify(value), expiresAt],
+    );
+  }
+
+  async authDelete(scope: string, key: string): Promise<void> {
+    await this.db.query("DELETE FROM auth_kv WHERE scope = $1 AND key = $2", [scope, key]);
+  }
+
+  async authList(scope: string): Promise<AuthStateEntry[]> {
+    const { rows } = await this.db.query<{ key: string; value: unknown; expires_at: string | Date | null }>(
+      `SELECT key, value, expires_at FROM auth_kv
+       WHERE scope = $1 AND (expires_at IS NULL OR expires_at > now())
+       ORDER BY key ASC`,
+      [scope],
+    );
+    return rows.map((row) => ({ key: row.key, value: row.value, expiresAt: isoOrNull(row.expires_at) }));
+  }
+
+  // ---- Invitations / revocations ----
+  async saveInvitation(record: InvitationRecord): Promise<void> {
+    await this.db.query(
+      `INSERT INTO invitations (token_hash, deal_id, expires_at, revoked)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (token_hash) DO UPDATE SET
+         deal_id = EXCLUDED.deal_id,
+         expires_at = EXCLUDED.expires_at,
+         revoked = EXCLUDED.revoked`,
+      [record.tokenHash, record.dealId, record.expiresAt, record.revoked],
+    );
+  }
+
+  async getInvitation(tokenHash: string): Promise<InvitationRecord | null> {
+    const { rows } = await this.db.query<{
+      token_hash: string;
+      deal_id: string;
+      created_at: string | Date;
+      expires_at: string | Date;
+      revoked: boolean;
+    }>("SELECT * FROM invitations WHERE token_hash = $1", [tokenHash]);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      tokenHash: row.token_hash,
+      dealId: row.deal_id,
+      createdAt: isoOrNull(row.created_at) ?? new Date().toISOString(),
+      expiresAt: isoOrNull(row.expires_at) ?? new Date().toISOString(),
+      revoked: row.revoked,
+    };
+  }
+
+  async revokeInvitation(tokenHash: string): Promise<void> {
+    await this.db.query("UPDATE invitations SET revoked = true WHERE token_hash = $1", [tokenHash]);
+  }
+
+  async redeemInvitation(input: {
+    draftId: string;
+    tokenHash: string;
+    counterpartyAddress: string;
+  }): Promise<{ redeemed: boolean; reason?: string }> {
+    const apply = async (db: SqlExecutor): Promise<{ redeemed: boolean; reason?: string }> => {
+      const { rows } = await db.query<{ revoked: boolean; expires_at: string | Date }>(
+        "SELECT revoked, expires_at FROM invitations WHERE token_hash = $1 FOR UPDATE",
+        [input.tokenHash],
+      );
+      const invitation = rows[0];
+      if (!invitation) return { redeemed: false, reason: "unknown-invitation" };
+      if (invitation.revoked) return { redeemed: false, reason: "revoked" };
+      const expiresAt = new Date(isoOrNull(invitation.expires_at) ?? 0).getTime();
+      if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) {
+        return { redeemed: false, reason: "expired" };
+      }
+      await db.query("UPDATE invitations SET revoked = true WHERE token_hash = $1", [input.tokenHash]);
+      await db.query(
+        `UPDATE drafts
+         SET counterparty_address = $2, status = 'accepted', version = version + 1, updated_at = now()
+         WHERE id = $1`,
+        [input.draftId, input.counterpartyAddress],
+      );
+      return { redeemed: true };
+    };
+    if (typeof this.db.withTransaction === "function") return this.db.withTransaction(apply);
+    return apply(this.db);
+  }
+
+  // ---- Transactions + lifecycle ----
+  async withTransaction<T>(fn: (store: Store) => Promise<T>): Promise<T> {
+    if (typeof this.db.withTransaction !== "function") return fn(this);
+    return this.db.withTransaction((tx) => fn(new PgStore(tx)));
   }
 }
 

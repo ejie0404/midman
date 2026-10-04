@@ -414,7 +414,9 @@ describe("external deal discovery", () => {
   it("listKnownDealIds surfaces an externally funded deal absent from drafts", async () => {
     const store = new MemoryStore();
     await store.putEvents([ev(TX_C, 0, 3, B3, DEAL_X)]);
-    assert.deepEqual(await store.listDealIds(), []);
+    // Phase 3: listDealIds derives from drafts + chain_events + registry +
+    // deals_meta, so an externally funded deal is discoverable directly too.
+    assert.ok((await store.listDealIds()).some((d) => d.toLowerCase() === DEAL_X.toLowerCase()));
 
     const known = await listKnownDealIds(store);
     assert.ok(known.some((d) => d.toLowerCase() === DEAL_X.toLowerCase()));

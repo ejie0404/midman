@@ -27,7 +27,7 @@
 import { createHash } from "node:crypto";
 import type { FastifyRequest } from "fastify";
 import { recoverMessageAddress, type Address, type Hash } from "viem";
-import { getCase } from "../review/registry.js";
+import { getCase, listOpen } from "../review/registry.js";
 
 /** Max seconds an expiry may lie in the future (clock-skew bound). */
 export const SIGNED_REQUEST_SKEW_SECONDS = 15 * 60;
@@ -225,6 +225,45 @@ export function isReviewer(wallet: string): boolean {
 /** Explicit supervisor role env; enables the REVIEWER_WALLETS superuser fallback. */
 export function supervisorModeEnabled(): boolean {
   return process.env["EVIDENCE_SUPERVISOR"] === "1";
+}
+
+/** A supervisor is an allowlisted wallet while EVIDENCE_SUPERVISOR=1. */
+export function isSupervisor(wallet: string): boolean {
+  return supervisorModeEnabled() && isReviewer(wallet);
+}
+
+/**
+ * STRICT reviewer check used by the route guard (Round-2, requirement 5): a
+ * reviewer may access a deal ONLY when assigned to it (review-registry
+ * primary/fallback, its per-deal allowlist) or as an explicit supervisor. A
+ * deal with NO review case grants NO reviewer access. This differs from the
+ * legacy `reviewerCanAccess` (kept for the evidence handlers and the
+ * pre-escalation on-call drill path) only in that it drops the global
+ * "no case -> roster" fallback.
+ */
+export function reviewerAssignedTo(dealId: string, wallet: string): boolean {
+  const want = wallet.toLowerCase();
+  const reviewCase = getCase(dealId);
+  if (reviewCase) {
+    const assigned = [...reviewCase.primary, ...reviewCase.fallback].some(
+      (entry) => entry.toLowerCase() === want,
+    );
+    if (assigned) return true;
+  }
+  if (dealReviewerAllowlist(dealId).has(want)) return true;
+  if (supervisorModeEnabled() && isReviewer(wallet)) return true;
+  return false;
+}
+
+/** True when `wallet` is assigned to at least one open review case (queue access). */
+export function hasAnyReviewerAssignment(wallet: string): boolean {
+  const want = wallet.toLowerCase();
+  for (const tracked of listOpen()) {
+    if ([...tracked.primary, ...tracked.fallback].some((entry) => entry.toLowerCase() === want)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Per-deal reviewer allowlist env: `dealId:wallet|wallet;dealId2:wallet`. */

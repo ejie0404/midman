@@ -27,6 +27,7 @@ import {
   type ReadinessAuthInput,
 } from "./chainActions.js";
 import { buildFundingBundle, storeDealSignature } from "./funding.js";
+import { dealParty } from "./evidence/access.js";
 
 export interface RouteDeps {
   readonly store: Store;
@@ -227,7 +228,25 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       };
     }
     const draft = await deps.store.getDraftByDeal(dealId);
-    if (draft) return { dealId, source: "draft", status: draft.status, terms: draft.terms };
+    if (draft) {
+      // Without the auth guard (legacy/no-enforcement mode) the projection is
+      // returned as before. With guards registered, `request.session` is
+      // always defined, so enforce party binding and never leak terms.
+      if (request.session === undefined) {
+        return { dealId, source: "draft", status: draft.status, terms: draft.terms };
+      }
+      const wallet = request.session?.wallet;
+      let authorized = false;
+      if (wallet) {
+        const want = wallet.toLowerCase();
+        if (draft.creatorWallet && draft.creatorWallet.toLowerCase() === want) authorized = true;
+        else if ((draft.terms["buyer"] ?? "").toLowerCase() === want && (draft.terms["buyer"] ?? "") !== "") authorized = true;
+        else if ((draft.terms["seller"] ?? "").toLowerCase() === want && (draft.terms["seller"] ?? "") !== "") authorized = true;
+        else if (deps.reader && deps.hub) authorized = (await dealParty(deps.store, deps.reader, deps.hub, dealId, wallet)) !== null;
+      }
+      if (authorized) return { dealId, source: "draft", status: draft.status, terms: draft.terms };
+      return reply.code(403).send(bad("Deal contents require party authentication"));
+    }
     if (events.length > 0) return { dealId, source: "projection", phase: "UNKNOWN", events: events.length };
     return reply.code(404).send(bad("Unknown deal"));
   });

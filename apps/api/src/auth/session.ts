@@ -13,6 +13,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Address } from "viem";
+import { getAuthPersistence } from "./persistence.js";
 
 export const SESSION_COOKIE = "midman_session";
 export const SESSION_IDLE_SECONDS = 30 * 60;
@@ -108,13 +109,21 @@ export function verifySessionToken(token: string, secret: string = sessionSecret
 
 const revokedNonces = new Set<string>();
 
-/** Revoke a session nonce (logout / compromise). */
+/** Revoke a session nonce (logout / compromise). Mirrored to AuthPersistence. */
 export function revokeSessionNonce(nonce: string): void {
   revokedNonces.add(nonce);
+  void getAuthPersistence().revokeSession(nonce);
 }
 
 export function isSessionNonceRevoked(nonce: string): boolean {
   return revokedNonces.has(nonce);
+}
+
+/** Rebuild the local deny-list from the durable adapter (restart / Phase 3). */
+export async function hydrateSessionRevocations(): Promise<void> {
+  const adapter = getAuthPersistence();
+  if (typeof adapter.listRevokedSessions !== "function") return;
+  for (const nonce of await adapter.listRevokedSessions()) revokedNonces.add(nonce);
 }
 
 function nowSeconds(): number {
