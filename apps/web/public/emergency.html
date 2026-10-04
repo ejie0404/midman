@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="Cache-Control" content="no-store" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Midman emergency recovery</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0d1117;
+        --panel: #161b22;
+        --line: #30363d;
+        --text: #e6edf3;
+        --muted: #9da7b3;
+        --accent: #d29922;
+        --danger: #f85149;
+        --ok: #3fb950;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        padding: 1rem;
+      }
+      main { max-width: 1100px; margin: 0 auto; }
+      h1 { font-size: 1.4rem; margin: 0 0 0.5rem; }
+      h2 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
+      .banner {
+        border: 1px solid var(--accent);
+        background: rgba(210, 153, 34, 0.12);
+        color: var(--accent);
+        border-radius: 8px;
+        padding: 0.75rem 1rem;
+        font-weight: 600;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 1rem;
+        margin-top: 1rem;
+      }
+      label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.6rem 0 0.2rem; }
+      textarea, input {
+        width: 100%;
+        background: #0b0f14;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        color: var(--text);
+        padding: 0.5rem;
+        font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      textarea { min-height: 120px; resize: vertical; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.5rem 1rem; }
+      button {
+        background: #21262d;
+        border: 1px solid var(--line);
+        color: var(--text);
+        border-radius: 6px;
+        padding: 0.45rem 0.8rem;
+        cursor: pointer;
+        font-size: 0.85rem;
+      }
+      button:hover { border-color: var(--muted); }
+      .row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.8rem; }
+      .error { color: var(--danger); margin-top: 0.6rem; white-space: pre-wrap; }
+      .ok { color: var(--ok); }
+      .kv { display: grid; grid-template-columns: 150px 1fr; gap: 0.25rem 0.75rem; font-size: 0.85rem; }
+      .kv dt { color: var(--muted); }
+      .kv dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, Menlo, Consolas, monospace; }
+      ul.rules { margin: 0.4rem 0 0; padding-left: 1.2rem; font-size: 0.9rem; }
+      ul.rules li { margin-bottom: 0.35rem; }
+      table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.82rem; }
+      th, td { border: 1px solid var(--line); padding: 0.5rem; text-align: left; vertical-align: top; }
+      th { background: #0b0f14; color: var(--muted); font-weight: 600; }
+      code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+      .hint { color: var(--muted); font-size: 0.78rem; margin-top: 0.35rem; }
+      .hint a { color: #58a6ff; }
+      .hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Midman emergency recovery</h1>
+      <p class="banner">
+        Contract state is authoritative; this page never signs or sends transactions. Use your own
+        wallet to submit calldata.
+      </p>
+
+      <section class="panel">
+        <h2>1. Load a deal</h2>
+        <label for="recovery">Paste a deal recovery package (JSON)</label>
+        <textarea id="recovery" spellcheck="false" placeholder='{"version":1,"chainId":8453,"hub":"0x...","usdc":"0x...","dealId":"0x...","emergencyCalldata":{...}}'></textarea>
+
+        <p class="hint">Or enter the values manually (used when the JSON box is empty):</p>
+        <div class="grid">
+          <div>
+            <label for="chainId">chainId</label>
+            <input id="chainId" inputmode="numeric" placeholder="8453" />
+          </div>
+          <div>
+            <label for="hub">hub address</label>
+            <input id="hub" spellcheck="false" placeholder="0x..." />
+          </div>
+          <div>
+            <label for="dealId">dealId (bytes32)</label>
+            <input id="dealId" spellcheck="false" placeholder="0x..." />
+          </div>
+          <div>
+            <label for="usdc">usdc address (optional)</label>
+            <input id="usdc" spellcheck="false" placeholder="0x..." />
+          </div>
+        </div>
+
+        <div class="row">
+          <button type="button" id="render">Render recovery actions</button>
+          <button type="button" id="clear">Clear</button>
+        </div>
+        <div id="error" class="error" role="alert"></div>
+      </section>
+
+      <section id="result" class="hidden"></section>
+    </main>
+
+    <script>
+      (function () {
+        "use strict";
+
+        // 4-byte selectors for Hub functions, verified against
+        // packages/chain HUB_ABI (apps/worker builds the same calldata).
+        var SELECTORS = {
+          refundForNonDelivery: "0x3c69cd89",
+          finalizeAfterTimeout: "0x4150eee1",
+          lapseDispute: "0x6ead5c58",
+          advanceToPrimary: "0xc2d6988a",
+          activateFallback: "0xb17ef160",
+          executeRuling: "0x19b12f73",
+          markDeadlock: "0x7d8fab81",
+          catastrophicEscape: "0xe2baae7a",
+          claimFor: "0xb822c9de"
+        };
+
+        var CLAIM_KINDS = {
+          claimBuyerPrincipal: 0,
+          claimSellerPrincipal: 1,
+          claimPlatformFee: 2,
+          claimBuyerBond: 3,
+          claimSellerBond: 4,
+          claimArbitrationCost: 5
+        };
+
+        var ACTIONS = [
+          { key: "refundForNonDelivery", label: "Refund buyer (non-delivery)", note: "Buyer refund after the delivery window closes without delivery." },
+          { key: "finalizeAfterTimeout", label: "Finalize to seller (inspection timeout)", note: "Release to seller after the inspection window closes without action." },
+          { key: "lapseDispute", label: "Lapse dispute", note: "Settle after dispute inactivity (48h)." },
+          { key: "advanceToPrimary", label: "Advance to primary review", note: "Escalation never happened; open primary review." },
+          { key: "activateFallback", label: "Activate fallback review", note: "Primary window ended without a ruling." },
+          { key: "executeRuling", label: "Execute queued ruling", note: "After the ruling delay; settles per award." },
+          { key: "markDeadlock", label: "Mark deadlock", note: "Fallback window ended without a ruling." },
+          { key: "catastrophicEscape", label: "Catastrophic escape", note: "Fixed 60-day cutoff from dispute open; settles without review." },
+          { key: "claimBuyerPrincipal", label: "Claim buyer principal", note: "kind 0" },
+          { key: "claimSellerPrincipal", label: "Claim seller principal", note: "kind 1" },
+          { key: "claimPlatformFee", label: "Claim platform fee", note: "kind 2" },
+          { key: "claimBuyerBond", label: "Claim buyer bond", note: "kind 3" },
+          { key: "claimSellerBond", label: "Claim seller bond", note: "kind 4" },
+          { key: "claimArbitrationCost", label: "Claim arbitration cost", note: "kind 5" }
+        ];
+
+        var EXPLORERS = {
+          8453: "https://basescan.org",
+          84532: "https://sepolia.basescan.org",
+          84531: "https://goerli.basescan.org"
+        };
+
+        var $ = function (id) { return document.getElementById(id); };
+
+        function explorerFor(chainId) {
+          return EXPLORERS[chainId] || "https://basescan.org";
+        }
+
+        function isAddress(value) {
+          return typeof value === "string" && /^0x[0-9a-fA-F]{40}$/.test(value);
+        }
+
+        function isHash(value) {
+          return typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value);
+        }
+
+        function isHex(value) {
+          return typeof value === "string" && /^0x[0-9a-fA-F]*$/.test(value) && value.length % 2 === 0;
+        }
+
+        function pad64(hexNo0x) {
+          return hexNo0x.toLowerCase().padStart(64, "0").slice(-64);
+        }
+
+        function encodeUint8(kind) {
+          return kind.toString(16).padStart(64, "0");
+        }
+
+        function calldataFor(key, dealId) {
+          var selector = key === "claimFor" ? SELECTORS.claimFor : SELECTORS[key];
+          if (!selector) return null;
+          if (key === "claimFor") return null;
+          return selector + dealId.slice(2).toLowerCase();
+        }
+
+        function claimCalldata(dealId, kind) {
+          return SELECTORS.claimFor + dealId.slice(2).toLowerCase() + encodeUint8(kind);
+        }
+
+        // Build the full emergency calldata set straight from the dealId, so the
+        // page still works when no recovery package is available.
+        function computeCalldata(dealId) {
+          var out = {};
+          Object.keys(SELECTORS).forEach(function (key) {
+            if (key === "claimFor") return;
+            out[key] = calldataFor(key, dealId);
+          });
+          Object.keys(CLAIM_KINDS).forEach(function (key) {
+            out[key] = claimCalldata(dealId, CLAIM_KINDS[key]);
+          });
+          return out;
+        }
+
+        function el(tag, className, text) {
+          var node = document.createElement(tag);
+          if (className) node.className = className;
+          if (text !== undefined && text !== null) node.textContent = String(text);
+          return node;
+        }
+
+        function showError(message) {
+          $("error").textContent = message;
+          $("result").classList.add("hidden");
+          $("result").textContent = "";
+        }
+
+        function clearError() {
+          $("error").textContent = "";
+        }
+
+        function copyText(text, button) {
+          var done = function () {
+            var previous = button.textContent;
+            button.textContent = "Copied";
+            window.setTimeout(function () { button.textContent = previous; }, 1200);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text, done); });
+          } else {
+            fallbackCopy(text, done);
+          }
+        }
+
+        function fallbackCopy(text, done) {
+          var area = document.createElement("textarea");
+          area.value = text;
+          area.setAttribute("readonly", "");
+          area.style.position = "fixed";
+          area.style.opacity = "0";
+          document.body.appendChild(area);
+          area.select();
+          try { document.execCommand("copy"); done(); } catch (e) { /* ignore */ }
+          document.body.removeChild(area);
+        }
+
+        function parseRecoveryPackage(raw) {
+          var parsed;
+          try {
+            parsed = JSON.parse(raw);
+          } catch (error) {
+            throw new Error("Invalid JSON: " + (error && error.message ? error.message : "could not parse"));
+          }
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            throw new Error("Recovery package must be a JSON object.");
+          }
+          if (!isHash(parsed.dealId)) throw new Error("Recovery package is missing a valid bytes32 dealId.");
+          if (!isAddress(parsed.hub)) throw new Error("Recovery package is missing a valid hub address.");
+          var chainId = Number(parsed.chainId);
+          if (!Number.isInteger(chainId) || chainId <= 0) {
+            throw new Error("Recovery package is missing a valid numeric chainId.");
+          }
+          return parsed;
+        }
+
+        function fromManual() {
+          var chainId = Number($("chainId").value.trim());
+          var hub = $("hub").value.trim();
+          var usdc = $("usdc").value.trim();
+          var dealId = $("dealId").value.trim();
+          if (!Number.isInteger(chainId) || chainId <= 0) throw new Error("Enter a numeric chainId.");
+          if (!isAddress(hub)) throw new Error("Enter a valid 20-byte hub address (0x + 40 hex).");
+          if (!isHash(dealId)) throw new Error("Enter a valid 32-byte dealId (0x + 64 hex).");
+          if (usdc && !isAddress(usdc)) throw new Error("USDC address is present but not a valid address.");
+          return { chainId: chainId, hub: hub, usdc: usdc || null, dealId: dealId };
+        }
+
+        function addRule(list, text) {
+          list.appendChild(el("li", null, text));
+        }
+
+        function buildSummary(data, emergencyCalldata) {
+          var panel = el("section", "panel");
+          panel.appendChild(el("h2", null, "2. Packed addresses"));
+          var explorer = explorerFor(data.chainId);
+          var dl = el("dl", "kv");
+
+          function add(term, value) {
+            dl.appendChild(el("dt", null, term));
+            var dd = el("dd", null, value);
+            dl.appendChild(dd);
+          }
+
+          add("chainId", data.chainId);
+          add("hub", data.hub);
+          if (data.usdc) add("usdc", data.usdc);
+          add("dealId", data.dealId);
+          add("explorer", explorer);
+          panel.appendChild(dl);
+
+          var link = el("a", null, "Open hub in block explorer");
+          link.href = explorer + "/address/" + data.hub;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer nofollow";
+          var hint = el("p", "hint");
+          hint.appendChild(link);
+          panel.appendChild(hint);
+          return panel;
+        }
+
+        function buildRules() {
+          var panel = el("section", "panel");
+          panel.appendChild(el("h2", null, "3. Fixed rules"));
+          var list = el("ul", "rules");
+          addRule(list, "One free dispute per deal: a second openDispute reverts DisputeExhausted.");
+          addRule(list, "24h / 24h windows: after escalation the evidence window runs 24h, and advanceToPrimary becomes callable 24h after escalatedAt.");
+          addRule(list, "60-day escape: catastrophicEscape becomes callable at disputeOpenedAt + 60 days (fixed cutoff, not extended).");
+          addRule(list, "All actions below are permissionless: anyone may submit them from any wallet.");
+          addRule(list, "A pending action is not an included action. Verify chain state before acting.");
+          panel.appendChild(list);
+          return panel;
+        }
+
+        function buildTable(data, emergencyCalldata) {
+          var panel = el("section", "panel");
+          panel.appendChild(el("h2", null, "4. Emergency calldata"));
+          var p = el("p", "hint", "Submit a 0-value transaction to the hub address with the calldata below using your own wallet.");
+          panel.appendChild(p);
+
+          var table = el("table");
+          var head = el("tr");
+          ["Action", "Calldata", "Copy", "Explorer"].forEach(function (title) {
+            head.appendChild(el("th", null, title));
+          });
+          table.appendChild(head);
+
+          ACTIONS.forEach(function (action) {
+            var calldata = emergencyCalldata[action.key];
+            var tr = el("tr");
+
+            var labelCell = el("td");
+            labelCell.appendChild(el("div", null, action.label));
+            var note = el("div", "hint", action.note);
+            labelCell.appendChild(note);
+            tr.appendChild(labelCell);
+
+            var dataCell = el("td");
+            if (isHex(calldata)) {
+              dataCell.appendChild(el("span", "mono", calldata));
+            } else {
+              dataCell.textContent = "unavailable";
+            }
+            tr.appendChild(dataCell);
+
+            var copyCell = el("td");
+            var button = el("button", null, "Copy");
+            button.type = "button";
+            if (isHex(calldata)) {
+              button.addEventListener("click", function () { copyText(calldata, button); });
+            } else {
+              button.disabled = true;
+            }
+            copyCell.appendChild(button);
+            tr.appendChild(copyCell);
+
+            var explorerCell = el("td");
+            var link = el("a", null, "hub");
+            link.href = explorerFor(data.chainId) + "/address/" + data.hub;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer nofollow";
+            explorerCell.appendChild(link);
+            explorerCell.appendChild(
+              el("div", "hint", "to=" + data.hub.slice(0, 10) + "… · value=0 · data=" + (isHex(calldata) ? calldata.slice(0, 10) + "…" : "n/a"))
+            );
+            tr.appendChild(explorerCell);
+
+            table.appendChild(tr);
+          });
+
+          panel.appendChild(table);
+          return panel;
+        }
+
+        function render(data) {
+          var result = $("result");
+          result.textContent = "";
+
+          var emergencyCalldata = computeCalldata(data.dealId);
+
+          if (data.emergencyCalldata && typeof data.emergencyCalldata === "object") {
+            Object.keys(emergencyCalldata).forEach(function (key) {
+              var supplied = data.emergencyCalldata[key];
+              if (isHex(supplied) && supplied.slice(0, 10) === emergencyCalldata[key].slice(0, 10)) {
+                emergencyCalldata[key] = supplied.toLowerCase();
+              }
+            });
+          }
+
+          result.appendChild(buildSummary(data, emergencyCalldata));
+          result.appendChild(buildRules());
+          result.appendChild(buildTable(data, emergencyCalldata));
+          result.classList.remove("hidden");
+          clearError();
+        }
+
+        $("render").addEventListener("click", function () {
+          var raw = $("recovery").value.trim();
+          try {
+            if (raw) {
+              render(parseRecoveryPackage(raw));
+            } else {
+              render(fromManual());
+            }
+          } catch (error) {
+            showError(error && error.message ? error.message : "Could not render recovery actions.");
+          }
+        });
+
+        $("clear").addEventListener("click", function () {
+          $("recovery").value = "";
+          ["chainId", "hub", "dealId", "usdc"].forEach(function (id) { $(id).value = ""; });
+          clearError();
+          $("result").classList.add("hidden");
+          $("result").textContent = "";
+        });
+      })();
+    </script>
+  </body>
+</html>

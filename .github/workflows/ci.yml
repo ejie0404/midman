@@ -1,0 +1,39 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node specs/validate-spec.mjs
+      - run: pnpm -r build
+      - run: pnpm -r typecheck
+      - run: pnpm -r test
+      # Release-gate scripts run against built worker dist.
+      - run: node scripts/export-abi.mjs
+      - run: node scripts/policy-hash.mjs
+      - run: node scripts/verify-manifest.mjs
+      - run: node scripts/run-drills.mjs
+      - run: pnpm test:scripts
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: cd packages/contracts && forge build --sizes
+      - run: cd packages/contracts && forge test
+        env:
+          # Fork suite self-skips when unset; set this secret for full RB-06 evidence.
+          BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}

@@ -1,0 +1,74 @@
+{
+  "specVersion": "0.2.0-phase1-approved",
+  "validation": "PASS",
+  "productionReady": false,
+  "counts": {
+    "references": 73,
+    "exhaustiveFeeCases": 541320,
+    "realUnitFeeCases": 546,
+    "randomFeeCases": 25000,
+    "bondCases": 588,
+    "catastrophicCases": 216,
+    "boundaryCases": 24,
+    "negativeInputCases": 6
+  },
+  "totalModelCases": 567700,
+  "releaseBlockers": [
+    {
+      "id": "RB-01",
+      "decision": "Phase 1 requirements locked (P-09); exact derivation algorithm bounded Phase 2 experiment",
+      "policy": "outagePolicyId"
+    },
+    {
+      "id": "RB-02",
+      "decision": "APPROVED P-05/P-06: tiers, 24h/7d/7d windows, tiered 24/48/72h delays, disjoint primary/fallback",
+      "policy": "arbitrationPolicyId"
+    },
+    {
+      "id": "RB-03",
+      "decision": "APPROVED P-03/P-04: proportional partial costs Cb=floor(Qb*S/P) Cs=floor(Qs*(P-S)/P); unilateral exits refund both; mutual bounded choice",
+      "policy": "bondPolicyId"
+    },
+    {
+      "id": "RB-04",
+      "decision": "APPROVED P-01/P-02: quote CEIL, catastrophic odd unit to buyer",
+      "policy": "feePolicyId"
+    },
+    {
+      "id": "RB-05",
+      "decision": "APPROVED P-07/P-08: cancel-only veto, epoch rule, 72h rotation delay, post-escape voluntary exits remain, rulings blocked",
+      "policy": "arbitrationPolicyId"
+    },
+    {
+      "id": "RB-06",
+      "decision": "Bounded Phase 2 experiment: hub-vs-vault benchmark, domain/custody binding, payment binding, USDC fork verification",
+      "policy": "ARCHITECTURE"
+    },
+    {
+      "id": "RB-07",
+      "decision": "APPROVED P-10/P-11: delivery 1h-30d, inspection min-14d, 2h readiness expiry for <=3h tier, safe-before-ship guidance",
+      "policy": "categoryPolicyId"
+    },
+    {
+      "id": "RB-08",
+      "decision": "APPROVED P-12/P-13: category minimums locked, delivery commitment at declaration, 24h evidence cutoff, 2y/5y retention",
+      "policy": "evidencePolicyId"
+    },
+    {
+      "id": "RB-09",
+      "decision": "APPROVED P-14 interim: $2500/mo pool, admission-required launch, concurrency + $10k/24h pair caps",
+      "policy": "ADMISSION"
+    }
+  ],
+  "unvalidated": [
+    "Base outage algorithm",
+    "Solidity implementation and uint256 integration",
+    "cryptographic signature/hash test vectors",
+    "reviewer governance and partial/voluntary bond policy",
+    "actual USDC fork integration",
+    "vault/hub benchmark",
+    "operational capacity and recovery drills"
+  ],
+  "command": "node D:/MM/specs/validate-spec.mjs",
+  "note": "Finite models, boundary checks and document references passed. This is not a complete state-machine, smart-contract or security audit."
+}

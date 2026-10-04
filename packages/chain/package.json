@@ -1,0 +1,20 @@
+{
+  "name": "@midman/chain",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/chain.test.mjs test/eip712-consolidation.test.mjs"
+  },
+  "dependencies": {
+    "@midman/shared": "workspace:*",
+    "viem": "2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.12.12",
+    "typescript": "5.4.5"
+  }
+}

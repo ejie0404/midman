@@ -1,0 +1,15 @@
+{
+  "name": "@midman/shared",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/financial.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.4.5"
+  }
+}

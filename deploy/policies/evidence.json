@@ -1,0 +1,21 @@
+{
+  "id": "evidence-v1",
+  "version": 1,
+  "description": "Canonical evidence policy: 24h respondent evidence cutoff, append-only signed manifests, secret scanning, and 2y/5y retention of originals and manifests.",
+  "values": {
+    "respondentEvidenceSeconds": "86400",
+    "evidenceCutoffSeconds": "86400",
+    "retentionOriginalsSeconds": "63072000",
+    "retentionManifestsSeconds": "157680000",
+    "secretScanRequired": true,
+    "appendOnlyManifest": true,
+    "originalsSeparateFromDerivatives": true,
+    "dualAuthorizationDeletion": true
+  },
+  "sourceRefs": [
+    "specs/policy-register.md#P-12",
+    "specs/policy-register.md#P-13",
+    "specs/contract-spec.json#constants.respondentEvidenceSeconds",
+    "specs/contract-spec.json#constants.evidenceRetention"
+  ]
+}

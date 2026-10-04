@@ -1,0 +1,20 @@
+{
+  "name": "@midman/api-client",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/client.test.mjs"
+  },
+  "dependencies": {
+    "@midman/chain": "workspace:*",
+    "@midman/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "20.12.12",
+    "typescript": "5.4.5"
+  }
+}

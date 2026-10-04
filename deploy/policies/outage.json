@@ -1,0 +1,28 @@
+{
+  "id": "outage-v1",
+  "version": 1,
+  "description": "Canonical outage policy: Chainlink Base sequencer feed, 30-minute recovery grace, bounded interval ledger, fail-closed timeouts / fail-open admissions, escape never adjusted.",
+  "values": {
+    "sequencerFeed": "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433",
+    "gracePeriodSeconds": "1800",
+    "maxIntervals": "8",
+    "escapeAdjustment": "NEVER",
+    "failClosedForTimeouts": true,
+    "failOpenForDisputeAdmission": true,
+    "adjustableDeadlines": [
+      "effectiveDeliveryDeadline",
+      "effectiveInspectionDeadline",
+      "effectiveSelfResolutionEnd",
+      "effectiveEscalationEnd",
+      "effectiveEvidenceEnd",
+      "effectivePrimaryEnd",
+      "effectiveFallbackEnd"
+    ],
+    "fixedDeadlines": ["escapeAt"]
+  },
+  "sourceRefs": [
+    "specs/policy-register.md#P-09",
+    "specs/contract-spec.json#constants.catastrophicEscapeSeconds",
+    "packages/contracts/src/MidmanPolicies.sol#OutagePolicy"
+  ]
+}

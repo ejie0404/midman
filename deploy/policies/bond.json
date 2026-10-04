@@ -1,0 +1,23 @@
+{
+  "id": "bond-v1",
+  "version": 1,
+  "description": "Canonical bond policy: 5 USDC minimum per contesting party, proportional floor partial-ruling costs, full refund on unilateral exits, bounded bilateral settlement choice.",
+  "values": {
+    "minimumBondUnits": "5000000",
+    "claimantBondDefaultUnits": "5000000",
+    "respondentBondDefaultUnits": "5000000",
+    "costsFormula": "Cb = floor(Qb * S / P); Cs = floor(Qs * (P - S) / P)",
+    "buyerBondRefundFormula": "Qb - Cb",
+    "sellerBondRefundFormula": "Qs - Cs",
+    "arbitrationCostClaimFormula": "Cb + Cs",
+    "unilateralExitRefundsBothBonds": true,
+    "bilateralSettlementBoundedByPosted": true,
+    "rulingCostBoundsRequired": true
+  },
+  "sourceRefs": [
+    "specs/policy-register.md#P-03",
+    "specs/policy-register.md#P-04",
+    "specs/contract-spec.json#constants.minimumBondUnits",
+    "specs/contract-spec.json#releaseBlockers(RB-03)"
+  ]
+}

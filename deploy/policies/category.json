@@ -1,0 +1,26 @@
+{
+  "id": "category-v1",
+  "version": 1,
+  "description": "Canonical category policy: six V1 categories with minimum inspection windows plus delivery/inspection duration bounds.",
+  "values": {
+    "deliveryBoundsSeconds": { "min": "3600", "max": "2592000" },
+    "inspectionBoundsSeconds": { "max": "1209600" },
+    "categories": [
+      { "name": "INSTANT_CODE", "minInspectionSeconds": "3600" },
+      { "name": "GAME_ITEM", "minInspectionSeconds": "43200" },
+      { "name": "GAME_CURRENCY", "minInspectionSeconds": "43200" },
+      { "name": "DIGITAL_GOOD", "minInspectionSeconds": "43200" },
+      { "name": "SERVICE", "minInspectionSeconds": "43200" },
+      { "name": "GAME_ACCOUNT", "minInspectionSeconds": "86400" }
+    ],
+    "gameAccountRecommendedInspectionSeconds": "259200",
+    "noCredentialOnPlatform": true
+  },
+  "sourceRefs": [
+    "specs/policy-register.md#P-10",
+    "specs/policy-register.md#P-12",
+    "specs/contract-spec.json#constants.categoryInspectionSeconds",
+    "specs/contract-spec.json#constants.deliveryBoundsSeconds",
+    "specs/contract-spec.json#constants.inspectionBoundsSeconds"
+  ]
+}

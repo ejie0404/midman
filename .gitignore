@@ -1,0 +1,17 @@
+node_modules/
+.pnp.*
+dist/
+build/
+.next/
+out/
+coverage/
+.env
+.env.local
+*.log
+.DS_Store
+# Foundry
+packages/contracts/out/
+packages/contracts/cache/
+packages/contracts/broadcast/
+# Data volumes
+data/

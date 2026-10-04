@@ -1,0 +1,59 @@
+{
+  "id": "arbitration-v1",
+  "version": 1,
+  "description": "Canonical arbitration policy: principal-based tiers, disjoint primary/fallback panels, 7d/7d review windows, tiered execution delays, cancel-only veto and 72h signer rotation.",
+  "values": {
+    "minimumRulingQuorum": "2",
+    "primaryReviewSeconds": "604800",
+    "fallbackReviewSeconds": "604800",
+    "vetoScope": "CANCEL_ONLY",
+    "vetoQuorum": "2",
+    "vetoPanelSize": "3",
+    "rotationDelaySeconds": "259200",
+    "primaryFallbackPanelsDisjoint": true,
+    "tiers": [
+      {
+        "name": "T1",
+        "minPrincipalUnits": "5000000",
+        "maxPrincipalUnits": "1000000000",
+        "primaryQuorum": "2",
+        "primaryPanelSize": "3",
+        "fallbackQuorum": "2",
+        "fallbackPanelSize": "3",
+        "executionDelaySeconds": "86400",
+        "vetoNoObjection": false
+      },
+      {
+        "name": "T2",
+        "minPrincipalExclusiveUnits": "1000000000",
+        "maxPrincipalUnits": "10000000000",
+        "primaryQuorum": "3",
+        "primaryPanelSize": "5",
+        "fallbackQuorum": "3",
+        "fallbackPanelSize": "5",
+        "executionDelaySeconds": "172800",
+        "vetoNoObjection": false
+      },
+      {
+        "name": "T3",
+        "minPrincipalExclusiveUnits": "10000000000",
+        "unbounded": true,
+        "primaryQuorum": "3",
+        "primaryPanelSize": "5",
+        "fallbackQuorum": "3",
+        "fallbackPanelSize": "5",
+        "executionDelaySeconds": "259200",
+        "vetoNoObjection": true
+      }
+    ]
+  },
+  "sourceRefs": [
+    "specs/policy-register.md#P-05",
+    "specs/policy-register.md#P-06",
+    "specs/policy-register.md#P-07",
+    "specs/contract-spec.json#constants.arbitrationTiers",
+    "specs/contract-spec.json#constants.primaryReviewSeconds",
+    "specs/contract-spec.json#constants.governanceDelaySeconds",
+    "apps/api/src/policyCopy.ts#QUORUM_TIERS_COPY"
+  ]
+}

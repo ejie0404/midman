@@ -1,0 +1,2651 @@
+{
+  "contract": "MidmanHub",
+  "source": "forge-artifact",
+  "artifact": "packages/contracts/out/MidmanHub.sol/MidmanHub.json",
+  "libraryArtifact": "packages/contracts/out/HubDispute.sol/HubDispute.json",
+  "solc": "0.8.26+commit.8a97fa7a",
+  "generatedAt": "2026-10-04T05:55:51.803Z",
+  "abi": [
+    {
+      "type": "constructor",
+      "inputs": [
+        {
+          "name": "usdc_",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "policies_",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "actionDigest",
+      "inputs": [
+        {
+          "name": "structHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "activateFallback",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "advanceNegotiation",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "advanceToPrimary",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "agreementDigestOf",
+      "inputs": [
+        {
+          "name": "t",
+          "type": "tuple",
+          "internalType": "struct DealTerms",
+          "components": [
+            {
+              "name": "dealId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "termsVersion",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "buyerAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sellerAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sellerPayoutAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "buyerRefundAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "buyerBondRefundAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sellerBondRefundAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "token",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "principal",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "quotedPlatformFee",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "buyerFeeBps",
+              "type": "uint16",
+              "internalType": "uint16"
+            },
+            {
+              "name": "agreementHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "feePolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "deliveryPeriodSeconds",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "inspectionPeriodSeconds",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "categoryPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "readinessPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "readinessConsentHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "evidencePolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "bondPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "arbitrationPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "outagePolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "catastrophicPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "platformFeeRecipient",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "arbitrationCostRecipient",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "fundingDeadline",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "nonce",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "salt",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "factory",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "implementation",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "custodyAddress",
+              "type": "address",
+              "internalType": "address"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "approveSeller",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "terminalPolicyVersion",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "nonce",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "expiresAt",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "sig",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "catastrophicEscape",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "claimFor",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "kind",
+          "type": "uint8",
+          "internalType": "uint8"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "claimIdOf",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "kind",
+          "type": "uint8",
+          "internalType": "uint8"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "eip712Domain",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "fields",
+          "type": "bytes1",
+          "internalType": "bytes1"
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "internalType": "string"
+        },
+        {
+          "name": "version",
+          "type": "string",
+          "internalType": "string"
+        },
+        {
+          "name": "chainId",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "verifyingContract",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "salt",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "extensions",
+          "type": "uint256[]",
+          "internalType": "uint256[]"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "escalate",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "collateralAmount",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "collateralSource",
+          "type": "uint8",
+          "internalType": "uint8"
+        },
+        {
+          "name": "claimId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "nonce",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "expiresAt",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "sig",
+          "type": "bytes",
+          "internalType": "bytes"
+        },
+        {
+          "name": "reserve",
+          "type": "tuple",
+          "internalType": "struct ReserveAuth",
+          "components": [
+            {
+              "name": "owner",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sourceClaimId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "party",
+              "type": "uint8",
+              "internalType": "uint8"
+            },
+            {
+              "name": "nonce",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "expiresAt",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "signature",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "escapeAt",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "executeRuling",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "executeUnpause",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "finalizeAfterTimeout",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "fund",
+      "inputs": [
+        {
+          "name": "t",
+          "type": "tuple",
+          "internalType": "struct DealTerms",
+          "components": [
+            {
+              "name": "dealId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "termsVersion",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "buyerAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sellerAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sellerPayoutAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "buyerRefundAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "buyerBondRefundAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sellerBondRefundAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "token",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "principal",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "quotedPlatformFee",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "buyerFeeBps",
+              "type": "uint16",
+              "internalType": "uint16"
+            },
+            {
+              "name": "agreementHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "feePolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "deliveryPeriodSeconds",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "inspectionPeriodSeconds",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "categoryPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "readinessPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "readinessConsentHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "evidencePolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "bondPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "arbitrationPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "outagePolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "catastrophicPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "platformFeeRecipient",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "arbitrationCostRecipient",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "fundingDeadline",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "nonce",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "salt",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "factory",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "implementation",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "custodyAddress",
+              "type": "address",
+              "internalType": "address"
+            }
+          ]
+        },
+        {
+          "name": "sigBuyer",
+          "type": "bytes",
+          "internalType": "bytes"
+        },
+        {
+          "name": "sigSeller",
+          "type": "bytes",
+          "internalType": "bytes"
+        },
+        {
+          "name": "pay",
+          "type": "tuple",
+          "internalType": "struct Payment3009",
+          "components": [
+            {
+              "name": "validAfter",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "validBefore",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "paymentSalt",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "v",
+              "type": "uint8",
+              "internalType": "uint8"
+            },
+            {
+              "name": "r",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "s",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "use3009",
+              "type": "bool",
+              "internalType": "bool"
+            }
+          ]
+        },
+        {
+          "name": "allowance",
+          "type": "tuple",
+          "internalType": "struct AllowanceIntent",
+          "components": [
+            {
+              "name": "paymentSalt",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "nonce",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "expiresAt",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "signature",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        },
+        {
+          "name": "admission",
+          "type": "tuple",
+          "internalType": "struct Admission",
+          "components": [
+            {
+              "name": "minPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "admissionNonce",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "expiresAt",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "signature",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        },
+        {
+          "name": "readiness",
+          "type": "tuple",
+          "internalType": "struct ReadinessAuth",
+          "components": [
+            {
+              "name": "attestedAt",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "nonce",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "expiresAt",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "signature",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "fundingPaused",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getClaim",
+      "inputs": [
+        {
+          "name": "claimId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "recipient",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getDeal",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "tuple",
+          "internalType": "struct Deal",
+          "components": [
+            {
+              "name": "funded",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "phase",
+              "type": "uint8",
+              "internalType": "uint8"
+            },
+            {
+              "name": "termsHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "buyer",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "seller",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sellerPayout",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "buyerRefund",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "buyerBondRefund",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sellerBondRefund",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "principal",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "quotedFee",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "buyerFeeBps",
+              "type": "uint16",
+              "internalType": "uint16"
+            },
+            {
+              "name": "prepaidBuyerFee",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "deliveryPeriod",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "inspectionPeriod",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "bondPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "arbitrationPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "outagePolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "platformFeeRecipient",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "arbitrationCostRecipient",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "fundedAt",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "deliveredAt",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "disputeOpenedAt",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "escalatedAt",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "fallbackStartedAt",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "disputeUsed",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "tier",
+              "type": "uint8",
+              "internalType": "uint8"
+            },
+            {
+              "name": "primaryQuorum",
+              "type": "uint8",
+              "internalType": "uint8"
+            },
+            {
+              "name": "fallbackQuorum",
+              "type": "uint8",
+              "internalType": "uint8"
+            },
+            {
+              "name": "execDelay",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "claimantBond",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "respondentBond",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "deliveryManifest",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "manifestHead",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "manifestCount",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "settlementNonce",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "rulingQueued",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "rulingOrigin",
+              "type": "uint8",
+              "internalType": "uint8"
+            },
+            {
+              "name": "rulingExecuteAt",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "rulingEpoch",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "rulingSellerAward",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "rulingBuyerCost",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "rulingSellerCost",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "rulingDigest",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            }
+          ]
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "isActionNonceUsed",
+      "inputs": [
+        {
+          "name": "nonce",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "isAdmissionNonceUsed",
+      "inputs": [
+        {
+          "name": "nonce",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "isAgreementNonceUsed",
+      "inputs": [
+        {
+          "name": "nonce",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "isRevoked",
+      "inputs": [
+        {
+          "name": "agreementDigest",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "isRulingNonceUsed",
+      "inputs": [
+        {
+          "name": "nonce",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "lapseDispute",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "ledgerTotals",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "escrow",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "bonds",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "claims",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "markDeadlock",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "markDelivered",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "manifestHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "nonce",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "expiresAt",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "sig",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "mutualSettlement",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "sellerAward",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "buyerCost",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "sellerCost",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "expectedPhase",
+          "type": "uint8",
+          "internalType": "uint8"
+        },
+        {
+          "name": "settlementNonce",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "expiresAt",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "sigBuyer",
+          "type": "bytes",
+          "internalType": "bytes"
+        },
+        {
+          "name": "sigSeller",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "openDispute",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "reasonCode",
+          "type": "uint8",
+          "internalType": "uint8"
+        },
+        {
+          "name": "initialCommitment",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "nonce",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "expiresAt",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "sig",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "pauseNewFunding",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "policies",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "contract MidmanPolicies"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "postRespondentBond",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "useExistingClaim",
+          "type": "bool",
+          "internalType": "bool"
+        },
+        {
+          "name": "claimId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "nonce",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "expiresAt",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "sig",
+          "type": "bytes",
+          "internalType": "bytes"
+        },
+        {
+          "name": "reserve",
+          "type": "tuple",
+          "internalType": "struct ReserveAuth",
+          "components": [
+            {
+              "name": "owner",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sourceClaimId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "party",
+              "type": "uint8",
+              "internalType": "uint8"
+            },
+            {
+              "name": "nonce",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "expiresAt",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "signature",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "proposeUnpause",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "queueFallbackRuling",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "r",
+          "type": "tuple",
+          "internalType": "struct RulingAuth",
+          "components": [
+            {
+              "name": "origin",
+              "type": "uint8",
+              "internalType": "uint8"
+            },
+            {
+              "name": "rulingNonce",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "sellerAward",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "buyerCost",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "sellerCost",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "evidenceCommitment",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "authEpoch",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "queueExpiry",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "signatures",
+              "type": "bytes[]",
+              "internalType": "bytes[]"
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "queuePrimaryRuling",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "r",
+          "type": "tuple",
+          "internalType": "struct RulingAuth",
+          "components": [
+            {
+              "name": "origin",
+              "type": "uint8",
+              "internalType": "uint8"
+            },
+            {
+              "name": "rulingNonce",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "sellerAward",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "buyerCost",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "sellerCost",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "evidenceCommitment",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "authEpoch",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "queueExpiry",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "signatures",
+              "type": "bytes[]",
+              "internalType": "bytes[]"
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "refundBuyer",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "terminalPolicyVersion",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "nonce",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "expiresAt",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "sig",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "refundForNonDelivery",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "rescueExcess",
+      "inputs": [
+        {
+          "name": "amount",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "revokeUnfundedTerms",
+      "inputs": [
+        {
+          "name": "t",
+          "type": "tuple",
+          "internalType": "struct DealTerms",
+          "components": [
+            {
+              "name": "dealId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "termsVersion",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "buyerAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sellerAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sellerPayoutAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "buyerRefundAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "buyerBondRefundAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sellerBondRefundAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "token",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "principal",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "quotedPlatformFee",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "buyerFeeBps",
+              "type": "uint16",
+              "internalType": "uint16"
+            },
+            {
+              "name": "agreementHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "feePolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "deliveryPeriodSeconds",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "inspectionPeriodSeconds",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "categoryPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "readinessPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "readinessConsentHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "evidencePolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "bondPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "arbitrationPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "outagePolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "catastrophicPolicyId",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "platformFeeRecipient",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "arbitrationCostRecipient",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "fundingDeadline",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "nonce",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "salt",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "factory",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "implementation",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "custodyAddress",
+              "type": "address",
+              "internalType": "address"
+            }
+          ]
+        },
+        {
+          "name": "revoker",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "nonce",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "expiresAt",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "sig",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "settled",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "submitEvidenceCommitment",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "uploader",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "sequence",
+          "type": "uint32",
+          "internalType": "uint32"
+        },
+        {
+          "name": "prevCommitment",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "fileHashes",
+          "type": "bytes32[]",
+          "internalType": "bytes32[]"
+        },
+        {
+          "name": "metadataCommitment",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "nonce",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "expiresAt",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "sig",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "totalLiabilities",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "usdc",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "contract IERC20"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "vetoFallbackRuling",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "rulingDigest",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "vsigs",
+          "type": "tuple[]",
+          "internalType": "struct VetoSig[]",
+          "components": [
+            {
+              "name": "authority",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "nonce",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "expiry",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "signature",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "vetoPrimaryRuling",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "rulingDigest",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "vsigs",
+          "type": "tuple[]",
+          "internalType": "struct VetoSig[]",
+          "components": [
+            {
+              "name": "authority",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "nonce",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "expiry",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "signature",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "event",
+      "name": "Claimed",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "kind",
+          "type": "uint8",
+          "indexed": false,
+          "internalType": "uint8"
+        },
+        {
+          "name": "recipient",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "DealFunded",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "agreementDigest",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "principal",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "funded",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "EIP712DomainChanged",
+      "inputs": [],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "ExcessRescued",
+      "inputs": [
+        {
+          "name": "to",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "FundingPaused",
+      "inputs": [],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "FundingUnpauseProposed",
+      "inputs": [
+        {
+          "name": "effectiveAt",
+          "type": "uint64",
+          "indexed": false,
+          "internalType": "uint64"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "FundingUnpaused",
+      "inputs": [],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "TermsRevoked",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "agreementDigest",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "error",
+      "name": "AddressEmptyCode",
+      "inputs": [
+        {
+          "name": "target",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "AddressInsufficientBalance",
+      "inputs": [
+        {
+          "name": "account",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "AlreadyFunded",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "BadNonce",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "BadPhase",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "BadSig",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "BadTerms",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "Expired",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "FailedInnerCall",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "InvalidShortString",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "MathOverflowedMulDiv",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NoClaim",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NotRole",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NothingToRescue",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "Paused",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "ReentrancyGuardReentrantCall",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "Revoked",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "SafeERC20FailedOperation",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "StringTooLong",
+      "inputs": [
+        {
+          "name": "str",
+          "type": "string",
+          "internalType": "string"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "TooEarly",
+      "inputs": []
+    },
+    {
+      "type": "event",
+      "name": "BondPosted",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "party",
+          "type": "uint8",
+          "indexed": false,
+          "internalType": "uint8"
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "source",
+          "type": "uint8",
+          "indexed": false,
+          "internalType": "uint8"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "DeadlockMarked",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "Delivered",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "deliveredAt",
+          "type": "uint64",
+          "indexed": false,
+          "internalType": "uint64"
+        },
+        {
+          "name": "manifestHash",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "DisputeLapsed",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "DisputeOpened",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "openedAt",
+          "type": "uint64",
+          "indexed": false,
+          "internalType": "uint64"
+        },
+        {
+          "name": "escapeAt",
+          "type": "uint64",
+          "indexed": false,
+          "internalType": "uint64"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "Escalated",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "collateral",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "source",
+          "type": "uint8",
+          "indexed": false,
+          "internalType": "uint8"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "Escaped",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "buyerShare",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "sellerShare",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "EvidenceCommitted",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "uploader",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "sequence",
+          "type": "uint32",
+          "indexed": false,
+          "internalType": "uint32"
+        },
+        {
+          "name": "commitment",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "PhaseAdvanced",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "phase",
+          "type": "uint8",
+          "indexed": false,
+          "internalType": "uint8"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "RulingQueued",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "origin",
+          "type": "uint8",
+          "indexed": false,
+          "internalType": "uint8"
+        },
+        {
+          "name": "executeAt",
+          "type": "uint64",
+          "indexed": false,
+          "internalType": "uint64"
+        },
+        {
+          "name": "sellerAward",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "RulingVetoed",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "origin",
+          "type": "uint8",
+          "indexed": false,
+          "internalType": "uint8"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "Settled",
+      "inputs": [
+        {
+          "name": "dealId",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "outcome",
+          "type": "uint8",
+          "indexed": false,
+          "internalType": "uint8"
+        },
+        {
+          "name": "sellerAward",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "earnedFee",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "buyerCost",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "sellerCost",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "error",
+      "name": "BadAward",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "DisputeExhausted",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NoQuorum",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "OutageUnknown",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "TooLate",
+      "inputs": []
+    }
+  ]
+}

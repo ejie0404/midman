@@ -1,0 +1,28 @@
+{
+  "name": "@midman/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "next build",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/shell.test.mjs test/money.test.mjs test/evidence.test.mjs test/review.test.mjs test/connectivity.test.mjs test/funding.test.mjs",
+    "dev": "next dev",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@midman/api-client": "workspace:*",
+    "@midman/chain": "workspace:*",
+    "@midman/shared": "workspace:*",
+    "next": "15.5.27",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "viem": "2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.12.12",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "typescript": "5.4.5"
+  }
+}

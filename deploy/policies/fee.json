@@ -1,0 +1,33 @@
+{
+  "id": "fee-v1",
+  "version": 1,
+  "description": "Canonical fee policy: CEIL quote, FLOOR proportional earned fee, buyer-floor/seller-remainder split, locked rate tiers and allocation set.",
+  "values": {
+    "minimumPrincipalUnits": "5000000",
+    "minimumQuotedFeeUnits": "500000",
+    "feeDenominator": "10000",
+    "quoteRounding": "CEIL",
+    "quoteFormula": "F = max(minimumQuotedFeeUnits, ceil(P * rateBps / feeDenominator))",
+    "actualFeeRounding": "FLOOR",
+    "actualFeeFormula": "E = floor(F * S / P)",
+    "buyerFeeRounding": "FLOOR",
+    "sellerFeeRounding": "REMAINDER",
+    "splitFormula": "buyerFee = floor(E * buyerFeeBps / feeDenominator); sellerFee = E - buyerFee",
+    "prepaidBuyerFeeFormula": "B0 = floor(F * buyerFeeBps / feeDenominator)",
+    "allocationsBps": ["0", "5000", "10000"],
+    "tiers": [
+      { "maximumInclusiveSeconds": "10800", "rateBps": "25" },
+      { "maximumExclusiveSeconds": "86400", "rateBps": "50" },
+      { "maximumInclusiveSeconds": "259200", "rateBps": "70" },
+      { "maximumInclusiveSeconds": "604800", "rateBps": "100" },
+      { "unbounded": true, "rateBps": "200" }
+    ]
+  },
+  "sourceRefs": [
+    "specs/policy-register.md#P-01",
+    "specs/policy-register.md#P-03",
+    "specs/contract-spec.json#constants.feeTiers",
+    "specs/contract-spec.json#constants.feeAllocationBps",
+    "apps/api/src/policyCopy.ts#FEE_FORMULA_COPY"
+  ]
+}

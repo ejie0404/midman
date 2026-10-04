@@ -1,0 +1,33 @@
+{
+  "name": "midman-v1",
+  "version": "0.2.0-phase1-approved",
+  "private": true,
+  "packageManager": "pnpm@9.12.3",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "validate:spec": "node specs/validate-spec.mjs",
+    "build": "pnpm -r build",
+    "export-abi": "node scripts/export-abi.mjs",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "test:scripts": "node --test scripts/policy-hash.test.mjs scripts/verify-manifest.test.mjs scripts/readiness.test.mjs scripts/export-abi.test.mjs scripts/verify-deployment.test.mjs",
+    "policy-hash": "node scripts/policy-hash.mjs",
+    "verify:manifest": "node scripts/verify-manifest.mjs",
+    "verify:manifest:strict": "node scripts/verify-manifest.mjs deploy/manifest.example.json --strict",
+    "drills": "node scripts/run-drills.mjs",
+    "verify:deployment": "node scripts/verify-deployment.mjs",
+    "readiness": "node scripts/readiness.mjs",
+    "db:migrate": "pnpm --filter @midman/api db:migrate"
+  },
+  "devDependencies": {
+    "typescript": "5.4.5"
+  },
+  "pnpm": {
+    "overrides": {
+      "ws": "8.22.0",
+      "postcss": "8.5.28"
+    }
+  }
+}

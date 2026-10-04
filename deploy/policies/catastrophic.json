@@ -1,0 +1,23 @@
+{
+  "id": "catastrophic-v1",
+  "version": 1,
+  "description": "Canonical catastrophic escape policy: fixed 60-day cutoff, 50/50 principal with the odd unit to the buyer, zero fees, prepaid buyer fee and real bonds refunded, proper escalation required.",
+  "values": {
+    "escapeSeconds": "5184000",
+    "principalRounding": "BUYER_CEIL_SELLER_FLOOR",
+    "buyerPrincipalShareFormula": "buyerPrincipalShare = (P + 1) / 2",
+    "sellerPrincipalShareFormula": "sellerPrincipalShare = P / 2",
+    "platformFeeBps": "0",
+    "refundPrepaidBuyerFee": true,
+    "refundRealBonds": true,
+    "requiresProperEscalation": true,
+    "escapeAdjustment": "NEVER"
+  },
+  "sourceRefs": [
+    "specs/policy-register.md#P-02",
+    "specs/policy-register.md#P-08",
+    "specs/contract-spec.json#constants.catastrophicEscapeSeconds",
+    "specs/contract-spec.json#constants.catastrophicPrincipalRounding",
+    "apps/api/src/policyCopy.ts#CATASTROPHIC_SPLIT_COPY"
+  ]
+}

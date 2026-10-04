@@ -1,0 +1,28 @@
+{
+  "name": "@midman/api",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/security.test.mjs test/api.test.mjs test/journey.test.mjs test/evidence.test.mjs test/categories.test.mjs test/review.test.mjs test/acceptance.test.mjs test/auth.test.mjs test/funding.test.mjs test/indexer-reorg.test.mjs test/evidence-hardening.test.mjs",
+    "start": "node dist/server.js",
+    "db:migrate": "node dist/db/migrate.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1146.0",
+    "@fastify/multipart": "9.4.0",
+    "@midman/chain": "workspace:*",
+    "@midman/shared": "workspace:*",
+    "@midman/store": "workspace:*",
+    "fastify": "5.12.5",
+    "ioredis": "5.3.2",
+    "pg": "8.11.3",
+    "viem": "2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.12.12",
+    "@types/pg": "8.10.9",
+    "typescript": "5.4.5"
+  }
+}

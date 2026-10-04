@@ -1,0 +1,73 @@
+{
+  "manifestVersion": 1,
+  "network": {
+    "name": "base",
+    "chainId": 8453
+  },
+  "deploymentStatus": "UNVERIFIED_PLACEHOLDER",
+  "contracts": {
+    "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "sequencerFeed": "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433",
+    "policies": "<policies placeholder>",
+    "hub": "<hub placeholder>",
+    "disputeLibrary": "<disputeLibrary placeholder>"
+  },
+  "roles": {
+    "governanceTimelock": "<governanceTimelock placeholder>",
+    "pauser": "<pauser placeholder>",
+    "admissionSigner": "<admissionSigner placeholder>",
+    "treasury": "<treasury placeholder>",
+    "platformFeeRecipient": "<platformFeeRecipient placeholder>",
+    "arbitrationCostRecipient": "<arbitrationCostRecipient placeholder>",
+    "primaryPanel": ["<primary-1 placeholder>", "<primary-2 placeholder>", "<primary-3 placeholder>"],
+    "fallbackPanel": ["<fallback-1 placeholder>", "<fallback-2 placeholder>", "<fallback-3 placeholder>"],
+    "vetoPanel": ["<veto-1 placeholder>", "<veto-2 placeholder>", "<veto-3 placeholder>"]
+  },
+  "policyHashes": {
+    "fee-v1": "0x7fecf4ea3c45d31cf07fa4272da2ae302403f68449a2b9d502b1263d26dd05bd",
+    "category-v1": "0xf355271ec479a145e5ba77f7fd4e53d552a0f4b2f71a58ec6ff0c2fee9cd5d43",
+    "readiness-v1": "0xf7fb738c0f9e77aaa164294b9d9dbaa62c30d62a8f3d7cbec0db13eea6b71a90",
+    "evidence-v1": "0x70354cc8f1a5d49205f8cb56a2140ece30afac4d0b1c65a9970bf7c387be23e7",
+    "bond-v1": "0x085dc20c99350f8573137c7dc2efb5c7a5ce41084a215999e579f4a074e341ce",
+    "arbitration-v1": "0x74a5f2aec27bb8ef303bab93c70da0a965c3460e5f342bf6448b5de8e1a522c9",
+    "outage-v1": "0xcf092d5c3dc67e90f46374b85e5c646b9a443d80d7e466c27d2ee7f301d94e22",
+    "catastrophic-v1": "0xdafba6e467ff5b83d4d9c50fe4d6480369ffa7f4eecf2e07661687de6e112a92"
+  },
+  "domain": {
+    "name": "MidmanEscrow",
+    "version": "1",
+    "chainId": 8453,
+    "verifyingContract": "<hub placeholder>"
+  },
+  "bytecodeHashes": {
+    "MidmanHub": "0x...",
+    "MidmanPolicies": "0x...",
+    "HubDispute": "0x..."
+  },
+  "dependencies": {
+    "node": "24.14.1",
+    "pnpm": "9.12.3",
+    "solc": "0.8.26",
+    "viaIr": true,
+    "optimizerRuns": 200,
+    "openzeppelin": "5.0.2",
+    "forgeStd": "1.17.0",
+    "viem": "2.9.0",
+    "next": "15.5.27",
+    "react": "19.3.0",
+    "fastify": "5.12.5",
+    "fastifyMultipart": "9.4.0",
+    "awsSdkS3": "3.1146.0",
+    "bullmq": "5.4.2"
+  },
+  "releaseCommit": "<40-hex placeholder>",
+  "freezeDate": null,
+  "notes": "Example release manifest for the Phase 12 release freeze. USDC and sequencer feed are the pinned Base mainnet addresses; all other deployment addresses, role holders, bytecode hashes and the release commit remain unresolved placeholders until the deployment script runs and the independent review closes. Policy hashes are computed from deploy/policies/*.json by scripts/policy-hash.mjs.",
+  "unresolved": [
+    "RB-06: policy records are recorded/hashed but concrete Base mainnet addresses for policies, hub, disputeLibrary, domain.verifyingContract and every role holder are pending architecture/fork decision.",
+    "Reviewer identities: primary, fallback and veto panel membership are placeholders until independently staffed and keyed; primary/fallback must be disjoint.",
+    "Audit completion: external contract and application security review findings must be resolved and remediation evidence attached before deploymentStatus can leave UNVERIFIED_PLACEHOLDER.",
+    "releaseCommit and freezeDate are placeholders until the audited source and dependency lockfile are frozen.",
+    "bytecodeHashes: compiled artifacts must be built from the frozen commit and the keccak256 of deployedBytecode recorded in this manifest."
+  ]
+}

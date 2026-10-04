@@ -1,0 +1,17 @@
+{
+  "id": "readiness-v1",
+  "version": 1,
+  "description": "Canonical readiness policy: expiring buyer readiness consent required only for the <=3h pricing tier, with a registered no-readiness marker otherwise.",
+  "values": {
+    "readinessExpirySeconds": "7200",
+    "requiresReadinessWhenPricingDurationMaxSeconds": "10800",
+    "shortDealMaxDeliverySeconds": "86400",
+    "noReadinessPolicyMarker": "NO_READINESS",
+    "readinessConsentHashZeroAllowedOnlyWhenNotRequired": true
+  },
+  "sourceRefs": [
+    "specs/policy-register.md#P-11",
+    "specs/contract-spec.json#constants.readinessExpirySeconds",
+    "specs/contract-spec.json#constants.deliveryBoundsSeconds"
+  ]
+}
