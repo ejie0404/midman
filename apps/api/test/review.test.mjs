@@ -394,6 +394,8 @@ describe("reviewer service (Phase 9)", () => {
       revocationNote: null,
       status: "accepted",
     });
+    const settlementNonce = "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f";
+    const expiresAt = Math.floor(Date.now() / 1_000) + 3_600;
     const base = {
       principalUnits: PRINCIPAL,
       claimantBondUnits: CLAIMANT_BOND,
@@ -403,8 +405,27 @@ describe("reviewer service (Phase 9)", () => {
       seller: seller.address,
       chainId: CHAIN_ID,
       hub: HUB,
-      settlementNonce: "0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      settlementNonce,
+      expiresAt: String(expiresAt),
     };
+    // Proposer (buyer) signs the authoritative envelope BEFORE publishing.
+    const mutualMessage = {
+      dealId: DEAL,
+      agreementDigest: AGREEMENT,
+      sellerAward: 60_000_000n,
+      buyerBondCost: 1_000_000n,
+      sellerBondCost: 1_000_000n,
+      expectedPhase: 4,
+      settlementNonce,
+      expiresAt: BigInt(expiresAt),
+    };
+    const proposerSig = await buyer.signTypedData({
+      domain: RULING_DOMAIN,
+      types: MUTUAL_TYPES,
+      primaryType: "MutualSettlement",
+      message: mutualMessage,
+    });
+
     const tooBig = await call(app, buyer, "POST", `/deals/${DEAL}/settlement-proposals`, {
       ...base,
       sellerAwardUnits: "100000001",
@@ -429,6 +450,7 @@ describe("reviewer service (Phase 9)", () => {
       buyerCostUnits: "1000000",
       sellerCostUnits: "1000000",
       expectedPhase: 4,
+      proposerSignature: proposerSig,
     });
     assert.equal(created.statusCode, 200);
     const proposal = created.json();
@@ -439,24 +461,7 @@ describe("reviewer service (Phase 9)", () => {
     assert.equal(listed.statusCode, 200);
     assert.equal(listed.json().proposals.length, 1);
 
-    const mutualMessage = {
-      dealId: DEAL,
-      agreementDigest: proposal.agreementDigest,
-      sellerAward: BigInt(proposal.sellerAward),
-      buyerBondCost: BigInt(proposal.buyerCost),
-      sellerBondCost: BigInt(proposal.sellerCost),
-      expectedPhase: proposal.expectedPhase,
-      settlementNonce: proposal.settlementNonce,
-      expiresAt: BigInt(proposal.expiresAt),
-    };
-    // Proposer (buyer) signs the exact proposal struct; counterparty (seller)
-    // signs the identical struct at accept time.
-    const proposerSig = await buyer.signTypedData({
-      domain: RULING_DOMAIN,
-      types: MUTUAL_TYPES,
-      primaryType: "MutualSettlement",
-      message: mutualMessage,
-    });
+    // Counterparty (seller) signs the identical struct at accept time.
     const sellerSig = await seller.signTypedData({
       domain: RULING_DOMAIN,
       types: MUTUAL_TYPES,

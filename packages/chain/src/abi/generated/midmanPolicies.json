@@ -3,7 +3,7 @@
   "source": "forge-artifact",
   "artifact": "packages/contracts/out/MidmanPolicies.sol/MidmanPolicies.json",
   "solc": "0.8.26+commit.8a97fa7a",
-  "abiHash": "e4cecacdd185583db60f21c8caa050aac18a4f8c4d6ab637a8af1010f1d1c437",
+  "abiHash": "d7eabbffff35a0ff9c71ebc7b5f754a9232ce9f1c00ec2018c979eeef0bcb377",
   "abi": [
     {
       "type": "constructor",
@@ -421,6 +421,19 @@
           "name": "",
           "type": "bool",
           "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "lastAuditedRound",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint80",
+          "internalType": "uint80"
         }
       ],
       "stateMutability": "view"
@@ -1096,6 +1109,19 @@
           "type": "address",
           "indexed": true,
           "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "OutageAudited",
+      "inputs": [
+        {
+          "name": "roundId",
+          "type": "uint80",
+          "indexed": true,
+          "internalType": "uint80"
         }
       ],
       "anonymous": false

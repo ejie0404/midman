@@ -294,9 +294,9 @@ contract AdversarialTest is MidmanHubTest {
         _fund(t, false);
         uint64 t0 = uint64(block.timestamp);
         // 4000s outage starting 1000s after funding; delivery period is 3600s.
-        feed.programOutage(7, t0 + 1_000, t0 + 5_000);
+        feed.programOutage(2, t0 + 1_000, t0 + 5_000);
         vm.warp(t0 + 5_000 + 1);
-        policies.reportOutage(7);
+        policies.reportOutage(2);
         // Original end (t0+3600) passed, but effective end includes 4000s + 1800s grace.
         _deliver(t.dealId);
     }
@@ -401,22 +401,20 @@ contract AdversarialTest is MidmanHubTest {
     /// fresh overlapping interval: every retained interval is summed.
     function testAllRetainedIntervalsCount() public {
         uint64 t0 = uint64(block.timestamp);
-        for (uint80 r = 10; r < 28; r += 2) {
-            uint64 s = t0 - 200_000 + uint64(r - 10) * 1_000;
+        for (uint80 r = 2; r < 20; r += 2) {
+            uint64 s = t0 - 200_000 + uint64(r - 2) * 1_000;
             feed.programOutage(r, s, s + 100);
         }
         vm.warp(t0 + 1);
-        for (uint80 r = 10; r < 28; r += 2) policies.reportOutage(r);
+        for (uint80 r = 2; r < 20; r += 2) policies.reportOutage(r);
         assertEq(policies.outageCount(), 9);
 
         DealTerms memory t = _terms(P, 10_000);
         _fund(t, false);
         uint64 fundedAt = hub.getDeal(t.dealId).fundedAt;
-        feed.programOutage(28, fundedAt + 1_000, fundedAt + 2_000);
+        feed.programOutage(20, fundedAt + 1_000, fundedAt + 2_000);
         vm.warp(fundedAt + 2_000 + 1);
-        policies.reportOutage(28);
-        // Seal the feed so no live trailing interval interferes.
-        feed.programUpRound(30, fundedAt + 2_000 + 1);
+        policies.reportOutage(20);
         assertEq(policies.outageCount(), 10);
         (uint64 rs, uint64 re) = policies.outageAt(9);
         assertEq(rs, fundedAt + 1_000);
@@ -434,10 +432,9 @@ contract AdversarialTest is MidmanHubTest {
         _fund(t, false);
         uint64 fundedAt = hub.getDeal(t.dealId).fundedAt;
         uint64 origEnd = fundedAt + 3_600;
-        feed.programOutage(40, origEnd - 100, origEnd + 5_000);
+        feed.programOutage(2, origEnd - 100, origEnd + 5_000);
         vm.warp(origEnd + 5_000 + 1);
-        policies.reportOutage(40);
-        feed.programUpRound(42, origEnd + 5_000 + 1);
+        policies.reportOutage(2);
         // Downtime 5,100 + grace 1,800 = 6,900 extension. eff = origEnd + 6,900.
         vm.warp(origEnd + 6_900);
         vm.prank(seller);
@@ -453,10 +450,9 @@ contract AdversarialTest is MidmanHubTest {
         (DealTerms memory t, uint64 openedAt) = _disputed(P, 10_000);
         uint64 escAt = _escalated(t, openedAt);
         uint64 evEnd = escAt + 86_400;
-        feed.programOutage(50, evEnd - 2_000, evEnd + 4_000);
+        feed.programOutage(2, evEnd - 2_000, evEnd + 4_000);
         vm.warp(evEnd + 4_000 + 1);
-        policies.reportOutage(50);
-        feed.programUpRound(52, evEnd + 4_000 + 1);
+        policies.reportOutage(2);
         // downtime 6,000 + grace 1,800 = 7,800.
         uint64 evEndEff = evEnd + 7_800;
         (,,,,, uint64 primary, , bool av) = hub.effectiveDeadlines(t.dealId);
@@ -467,23 +463,33 @@ contract AdversarialTest is MidmanHubTest {
         assertEq(hub.getDeal(t.dealId).phase, 5);
     }
 
-    /// @notice An outage that ended but was never reported still counts via
-    /// the live feed trailing interval (closes the report-delay window).
-    function testUnreportedRecentOutageCounts() public {
+    /// @notice An outage that ended but was never reported no longer counts
+    /// silently: the coverage watermark is behind the head, so history is
+    /// UNKNOWN and the timeout is blocked. Reporting the transition restores
+    /// the (downtime + grace) extension.
+    function testUnreportedOutageMakesHistoryUnavailable() public {
         DealTerms memory t = _terms(P, 10_000);
         _fund(t, false);
         _deliver(t.dealId);
         uint64 inspEnd = uint64(block.timestamp) + 3_600;
-        feed.programOutage(60, inspEnd - 1_000, inspEnd - 500);
-        // Never reported. Latest round is up; trailing = [inspEnd-1000, inspEnd-500].
-        // Overlap 500 + grace 1800, extension 2300. eff = inspEnd + 2300.
-        // Timeout is extended too: still too early here (phase DELIVERED).
+        feed.programOutage(2, inspEnd - 1_000, inspEnd - 500);
+        // Never reported: head is up but the watermark is still 1.
         vm.warp(inspEnd + 2_000);
-        vm.expectRevert(TooEarly.selector);
+        (,,,,, , , bool av) = hub.effectiveDeadlines(t.dealId);
+        assertFalse(av, "unreported outage leaves history unknown");
+        vm.expectRevert(OutageUnknown.selector);
         hub.finalizeAfterTimeout(t.dealId);
-        // Fail-open admission works inside the extended window.
+        // Admission is fail-open against the ORIGINAL deadline (already passed).
+        vm.prank(buyer);
+        vm.expectRevert(TooLate.selector);
+        hub.openDispute(t.dealId, 1, bytes32(0), bytes32(0), 0, new bytes(0));
+        // Reporting restores the clock: eff = inspEnd + downtime(500) + grace(1800).
+        policies.reportOutage(2);
+        (,,,,, , , bool av2) = hub.effectiveDeadlines(t.dealId);
+        assertTrue(av2, "restored");
         vm.prank(buyer);
         hub.openDispute(t.dealId, 1, bytes32(0), bytes32(0), 0, new bytes(0));
+        assertEq(hub.getDeal(t.dealId).phase, 2, "dispute opened in extended window");
     }
 
     /// @notice Absolute-age pruning drops only intervals older than
@@ -495,18 +501,18 @@ contract AdversarialTest is MidmanHubTest {
         _deliver(t.dealId);
         uint64 deliveredAt = hub.getDeal(t.dealId).deliveredAt;
         // A recent interval is retained.
-        feed.programOutage(100, deliveredAt + 10, deliveredAt + 20);
+        feed.programOutage(2, deliveredAt + 10, deliveredAt + 20);
         vm.warp(deliveredAt + 21);
-        policies.reportOutage(100);
+        policies.reportOutage(2);
         assertEq(policies.outageCount(), 1);
 
         // Age it far past MAX_HISTORY_AGE, then report a fresh interval which
         // prunes the old one by absolute age only.
         vm.warp(deliveredAt + policies.MAX_HISTORY_AGE() + 1 days);
         uint64 nowTs = uint64(block.timestamp);
-        feed.programOutage(102, nowTs - 10, nowTs);
+        feed.programOutage(4, nowTs - 10, nowTs);
         vm.warp(nowTs + 1);
-        policies.reportOutage(102);
+        policies.reportOutage(4);
         assertEq(policies.outageCount(), 1, "old interval pruned");
         assertGe(policies.prunedBefore(), deliveredAt + 20, "prunedBefore advanced");
 

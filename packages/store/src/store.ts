@@ -121,6 +121,18 @@ export interface Store {
   /** Reset expired processing leases back to queued. Returns rows affected. */
   reapExpiredRelayLeases(): Promise<number>;
   finishRelay(key: string, status: string, txHash: string | null, result: Record<string, unknown> | null): Promise<void>;
+  /**
+   * Ownership-guarded finish: mutates the job ONLY while `owner` still holds
+   * the lease. Returns false when the lease was lost, so a stale worker never
+   * overwrites the state of the worker that actually owns the job.
+   */
+  finishRelayOwned(
+    key: string,
+    status: string,
+    txHash: string | null,
+    result: Record<string, unknown> | null,
+    owner: string,
+  ): Promise<boolean>;
   listQueuedRelay(queue: string, limit: number): Promise<RelayJob[]>;
   /**
    * Mandatory recovery query: every job in a given lifecycle status (newest
@@ -146,6 +158,8 @@ export interface Store {
   kvGetWithVersion(ns: string, dealId: string, key: string): Promise<VersionedValue | null>;
   kvList(ns: string, dealId: string): Promise<KvEntry[]>;
   kvPut(ns: string, dealId: string, key: string, value: unknown): Promise<void>;
+  /** Create-only put: returns false if the key already exists (single-use slots). */
+  kvPutIfAbsent(ns: string, dealId: string, key: string, value: unknown): Promise<boolean>;
   /** Compare-and-set put; throws ConflictError when the expected version is stale. */
   kvPutCas(ns: string, dealId: string, key: string, value: unknown, expectedVersion: number): Promise<number>;
   kvDelete(ns: string, dealId: string, key: string): Promise<void>;
@@ -162,6 +176,18 @@ export interface Store {
   authPut(scope: string, key: string, value: unknown, expiresAt?: string | null): Promise<void>;
   authDelete(scope: string, key: string): Promise<void>;
   authList(scope: string): Promise<AuthStateEntry[]>;
+  /**
+   * Atomically delete-and-return the value (single `DELETE ... RETURNING` in
+   * SQL). Exactly one concurrent caller receives a non-null result; this is the
+   * single-use primitive for login-challenge consumption.
+   */
+  authConsume(scope: string, key: string): Promise<unknown | null>;
+  /**
+   * Read a row under an exclusive lock so a compare-and-set can run atomically
+   * inside `withTransaction` on Postgres. Falls back to `authGet` where row
+   * locks are not available (in-memory).
+   */
+  authGetForUpdate(scope: string, key: string): Promise<unknown | null>;
 
   // ---- Invitations / revocations ----
   saveInvitation(record: InvitationRecord): Promise<void>;
@@ -387,6 +413,23 @@ export class MemoryStore implements Store {
     job.leaseExpiresAt = null;
     job.version = (job.version ?? 0) + 1;
   }
+  async finishRelayOwned(
+    key: string,
+    status: string,
+    txHash: string | null,
+    result: Record<string, unknown> | null,
+    owner: string,
+  ): Promise<boolean> {
+    const job = this.relay.get(key);
+    if (!job || job.leaseOwner !== owner) return false;
+    job.status = status;
+    job.txHash = txHash;
+    job.result = result;
+    job.leaseOwner = null;
+    job.leaseExpiresAt = null;
+    job.version = (job.version ?? 0) + 1;
+    return true;
+  }
   async listQueuedRelay(queue: string, limit: number): Promise<RelayJob[]> {
     return [...this.relay.values()].filter((j) => j.queue === queue && j.status === "queued").slice(0, limit);
   }
@@ -482,6 +525,19 @@ export class MemoryStore implements Store {
       updatedAt: new Date().toISOString(),
     });
   }
+  async kvPutIfAbsent(ns: string, dealId: string, key: string, value: unknown): Promise<boolean> {
+    const byDeal = this.kvDealMap(ns, dealId, false);
+    if (byDeal?.has(key)) return false;
+    this.kvDealMap(ns, dealId, true)!.set(key, { value, version: 1 });
+    this.dealsMeta.set(normalizeDeal(dealId), {
+      dealId,
+      source: "registry",
+      firstSeenAt: this.dealsMeta.get(normalizeDeal(dealId))?.firstSeenAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    return true;
+  }
+
   async kvPutCas(ns: string, dealId: string, key: string, value: unknown, expectedVersion: number): Promise<number> {
     const byDeal = this.kvDealMap(ns, dealId, false);
     const existing = byDeal?.get(key);
@@ -541,6 +597,19 @@ export class MemoryStore implements Store {
     }
     return out.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   }
+  async authConsume(scope: string, key: string): Promise<unknown | null> {
+    // No `await` between the read and the delete, so the get+delete is a single
+    // critical section on the event loop: exactly one caller observes the value.
+    const byScope = this.auth.get(scope);
+    const entry = byScope?.get(key);
+    if (!entry) return null;
+    byScope!.delete(key);
+    if (entry.expiresAt !== null && new Date(entry.expiresAt).getTime() <= Date.now()) return null;
+    return entry.value;
+  }
+  async authGetForUpdate(scope: string, key: string): Promise<unknown | null> {
+    return this.authGet(scope, key);
+  }
 
   async saveInvitation(record: InvitationRecord): Promise<void> {
     this.invitations.set(record.tokenHash, { ...record });
@@ -570,9 +639,18 @@ export class MemoryStore implements Store {
     return { redeemed: true };
   }
 
+  // Serializes in-memory transactions so a read-check-write CAS cannot
+  // interleave at an `await` (mirrors Postgres row locking).
+  private txChain: Promise<unknown> = Promise.resolve();
+
   async withTransaction<T>(fn: (store: Store) => Promise<T>): Promise<T> {
-    // In-memory store has no rollback; execute directly.
-    return fn(this);
+    // In-memory store has no rollback; serialize execution to emulate a lock.
+    const run = this.txChain.then(() => fn(this));
+    this.txChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   async close(): Promise<void> {

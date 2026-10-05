@@ -26,8 +26,12 @@ export interface TickResult {
   readonly reorg: boolean;
 }
 
+const LOCK_NS = "indexer.lock";
+const LOCK_TTL_MS = 120_000;
+
 export class WorkerIndexer {
   private chain: Promise<unknown> = Promise.resolve();
+  private readonly lockOwner = `indexer-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
 
   constructor(
     private readonly reader: ChainReader,
@@ -37,12 +41,56 @@ export class WorkerIndexer {
 
   /** Serialized forward scan (single-flight: overlapping calls queue). */
   tick(): Promise<TickResult> {
-    return this.serialize(() => this.tickInner());
+    return this.serialize(() =>
+      this.withLock(
+        () => this.tickInner(),
+        async () => {
+          const tip = await this.store.getTip(this.config.hub);
+          return {
+            scannedTo: tip ? tip.blockNumber : this.config.fromBlock - 1n,
+            added: 0,
+            orphaned: 0,
+            reorg: false,
+          };
+        },
+      ),
+    );
   }
 
   /** Serialized full replay from a deployment block. */
   replay(fromBlock?: bigint): Promise<void> {
-    return this.serialize(() => this.replayInner(fromBlock));
+    return this.serialize(() => this.withLock(() => this.replayInner(fromBlock), async () => {}));
+  }
+
+  /**
+   * Cross-process lock: only one worker may advance this hub's cursor at a
+   * time. Without it, a slower instance can read a stale tip and overwrite a
+   * newer one. Held via a TTL row so a crashed holder self-heals.
+   */
+  private async withLock<T>(fn: () => Promise<T>, fallback: () => Promise<T>): Promise<T> {
+    if (!(await this.tryAcquire())) return fallback();
+    try {
+      return await fn();
+    } finally {
+      await this.release();
+    }
+  }
+
+  private async tryAcquire(): Promise<boolean> {
+    const key = this.config.hub.toLowerCase();
+    const payload = { owner: this.lockOwner, expiresAt: Date.now() + LOCK_TTL_MS };
+    if (await this.store.kvPutIfAbsent(LOCK_NS, key, "lock", payload)) return true;
+    const existing = (await this.store.kvGet(LOCK_NS, key, "lock")) as { owner?: string; expiresAt?: number } | null;
+    if (existing && typeof existing.expiresAt === "number" && existing.expiresAt > Date.now()) return false;
+    // Expired holder: steal it. A brief race here is resolved by the create-only put.
+    await this.store.kvDelete(LOCK_NS, key, "lock");
+    return this.store.kvPutIfAbsent(LOCK_NS, key, "lock", payload);
+  }
+
+  private async release(): Promise<void> {
+    const key = this.config.hub.toLowerCase();
+    const existing = (await this.store.kvGet(LOCK_NS, key, "lock")) as { owner?: string } | null;
+    if (existing?.owner === this.lockOwner) await this.store.kvDelete(LOCK_NS, key, "lock");
   }
 
   private serialize<T>(fn: () => Promise<T>): Promise<T> {

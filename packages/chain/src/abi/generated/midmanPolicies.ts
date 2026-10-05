@@ -424,6 +424,19 @@ export const MIDMAN_POLICIES_ABI = [
   },
   {
     "type": "function",
+    "name": "lastAuditedRound",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint80",
+        "internalType": "uint80"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "outageAt",
     "inputs": [
       {
@@ -1093,6 +1106,19 @@ export const MIDMAN_POLICIES_ABI = [
         "type": "address",
         "indexed": true,
         "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "OutageAudited",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "uint80",
+        "indexed": true,
+        "internalType": "uint80"
       }
     ],
     "anonymous": false

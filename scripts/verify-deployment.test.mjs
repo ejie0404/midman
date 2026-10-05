@@ -38,7 +38,7 @@ function baseManifest() {
   types.forEach((type, index) => {
     policyHashes[type] = `0x${(index + 1).toString(16).padStart(2, '0').repeat(32)}`;
   });
-  return {
+  const manifest = {
     manifestVersion: 1,
     network: { name: 'base', chainId: 8453 },
     deploymentStatus: 'VERIFIED',
@@ -77,11 +77,20 @@ function baseManifest() {
     hubTiers: EXPECTED_HUB_TIERS.map((tier) => ({ ...tier })),
     expectedPrincipals: ['5000000', '1000000001'],
     domain: { name: 'MidmanEscrow', version: '1', chainId: 8453, verifyingContract: H('11') },
-    bytecodeHashes: { MidmanHub: '0x...', MidmanPolicies: '0x...' },
+    bytecodeHashes: {},
     dependencies: {},
     releaseCommit: null,
     expectedFundedDeals: 0,
   };
+  // Pin the DEPLOYED (linked) runtime hashes so a passing manifest verifies
+  // completely: the verifier now treats unpinned bytecode as required-unresolved.
+  const viem = loadViem();
+  manifest.bytecodeHashes = {
+    MidmanHub: viem.keccak256(hubCodeFor(manifest)),
+    MidmanPolicies: viem.keccak256(FAKE_CODE),
+    HubDispute: viem.keccak256(FAKE_CODE),
+  };
+  return manifest;
 }
 
 function policyTuple(type, manifest) {
@@ -136,6 +145,30 @@ function buildHandlers(manifest) {
   for (const [type, getter] of Object.entries(POLICY_GETTERS)) {
     handlers[`${policies}:${getter.fn}`] = () => policyTuple(type, manifest);
   }
+  // Approved category matrix: per-id minimums (the verifier reads each id).
+  const viem = loadViem();
+  const CATEGORY_MIN = {
+    INSTANT_CODE: 3_600n,
+    GAME_ITEM: 43_200n,
+    GAME_CURRENCY: 43_200n,
+    DIGITAL_GOOD: 43_200n,
+    SERVICE: 43_200n,
+    GAME_ACCOUNT: 86_400n,
+  };
+  handlers[`${policies}:categoryPolicies`] = (args = []) => {
+    const id = String(args[0] || '').toLowerCase();
+    for (const [name, min] of Object.entries(CATEGORY_MIN)) {
+      const derived = viem.keccak256(viem.stringToHex(`MIDMAN.CATEGORY.${name}.v1`)).toLowerCase();
+      if (id === derived) return [true, derived, min];
+    }
+    return policyTuple('category-v1', manifest);
+  };
+  handlers[`${policies}:readinessPolicies`] = (args = []) => {
+    const id = String(args[0] || '').toLowerCase();
+    const required = viem.keccak256(viem.stringToHex('MIDMAN.READINESS.REQUIRED.v1')).toLowerCase();
+    if (id === required) return [true, required, true];
+    return policyTuple('readiness-v1', manifest);
+  };
   return handlers;
 }
 
@@ -164,7 +197,7 @@ function makeClient(manifest, { reads = {}, codes = {} } = {}) {
       calls.push({ address: address.toLowerCase(), functionName, args: args || [] });
       const handler = handlers[key];
       if (!handler) throw new Error(`no stub for ${key}`);
-      return typeof handler === 'function' ? handler() : handler;
+      return typeof handler === 'function' ? handler(args || []) : handler;
     },
   };
 }
@@ -441,13 +474,13 @@ describe('linked HubDispute library', () => {
     assert.equal(findCheck(result, 'link.hub').status, 'fail');
   });
 
-  it('treats a pinned pre-link hub code hash as advisory, not a failure', async () => {
+  it('fails a linked-hub bytecode hash that does not match the deployed runtime', async () => {
     const viem = loadViem();
     const manifest = baseManifest();
     manifest.bytecodeHashes.MidmanHub = viem.keccak256(`0x${'77'.repeat(32)}`);
     const { result } = await run(manifest);
-    assert.equal(findCheck(result, 'codeHash.MidmanHub').status, 'unresolved');
-    assert.equal(result.ok, true);
+    assert.equal(findCheck(result, 'codeHash.MidmanHub').status, 'fail');
+    assert.equal(result.ok, false);
   });
 });
 

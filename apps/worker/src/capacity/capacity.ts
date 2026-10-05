@@ -183,12 +183,16 @@ export async function durableAdmissionContext(input: {
   }
   let activeEscalatedCount = 0;
   let pairExposure24hUnits = 0n;
+  let readFailures = 0;
   const since = BigInt(nowSeconds) - 86_400n;
   for (const dealId of await listKnownDealIds(input.store as unknown as Store)) {
     let deal: Record<string, bigint | string | boolean | number>;
     try {
       deal = await reader.getDeal(hub, dealId as Hash);
     } catch {
+      // An unreadable deal is UNKNOWN exposure, not zero: degrade so admission
+      // fails closed instead of believing the pair/protocol is idle.
+      readFailures += 1;
       continue;
     }
     if (deal["funded"] !== true) continue;
@@ -206,7 +210,7 @@ export async function durableAdmissionContext(input: {
       pairExposure24hUnits += toBigUnits(deal["principal"]);
     }
   }
-  return { activeEscalatedCount, pairExposure24hUnits, degraded: false };
+  return { activeEscalatedCount, pairExposure24hUnits, degraded: readFailures > 0 };
 }
 
 function toBigUnits(value: bigint | string | number | boolean | undefined): bigint {

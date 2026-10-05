@@ -1,6 +1,6 @@
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +16,11 @@ import { dueForPurge, purgeExpired, RETENTION_SECONDS } from "../dist/evidence/r
 import { MAX_UPLOAD_BYTES, validateUpload } from "../dist/evidence/uploadChecks.js";
 import { scanTextForSecrets } from "../dist/categories/secrets.js";
 import { MemoryStore } from "../dist/db.js";
+import {
+  EVIDENCE_AUTH_APP,
+  buildMetadataSignedMessage,
+  evidenceAuthDomain,
+} from "../dist/evidence/access.js";
 
 const BUYER_KEY = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SELLER_KEY = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -46,6 +51,49 @@ async function signedHeaders(account, method, path, bodyBytes) {
     "x-wallet-address": account.address,
     "x-wallet-expiry": expiry,
     "x-wallet-signature": signature,
+  };
+}
+
+/** Metadata-bound headers (required for evidence upload mutations). */
+async function metaHeaders(account, method, path, fields) {
+  const {
+    dealId,
+    action,
+    fileHash,
+    filename,
+    mime,
+    size,
+    bodyBytes = Buffer.alloc(0),
+  } = fields;
+  const expiry = String(Math.floor(Date.now() / 1_000) + 300);
+  const nonce = randomBytes(16).toString("hex");
+  const meta = {
+    app: EVIDENCE_AUTH_APP,
+    domain: evidenceAuthDomain(),
+    method,
+    path,
+    dealId,
+    action,
+    fileHash,
+    filename,
+    mime,
+    size: String(size),
+    bodySha256: sha256hex(bodyBytes),
+    nonce,
+    expiry,
+  };
+  const signature = await account.signMessage({ message: buildMetadataSignedMessage(meta) });
+  return {
+    "x-wallet-address": account.address,
+    "x-wallet-expiry": expiry,
+    "x-wallet-signature": signature,
+    "x-request-nonce": nonce,
+    "x-request-action": action,
+    "x-request-deal": dealId,
+    "x-request-file": fileHash,
+    "x-request-filename": filename,
+    "x-request-mime": mime,
+    "x-request-size": String(size),
   };
 }
 
@@ -103,11 +151,19 @@ async function uploadFile(app, dealId, account, { bytes, filename, contentType, 
     { filename, contentType, bytes },
   );
   const path = `/deals/${dealId}/evidence`;
+  const fileHash = sha256hex(bytes);
   return app.inject({
     method: "POST",
     url: path,
     headers: {
-      ...(await signedHeaders(account, "POST", path, Buffer.alloc(0))),
+      ...(await metaHeaders(account, "POST", path, {
+        dealId,
+        action: "evidence.upload",
+        fileHash,
+        filename,
+        mime: contentType || "application/octet-stream",
+        size: bytes.length,
+      })),
       "content-type": `multipart/form-data; boundary=${boundary}`,
     },
     payload: body,

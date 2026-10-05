@@ -48,6 +48,10 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RoutePermission>> = Obje
   "POST /auth/logout": { access: "public", note: "clears/revokes the caller's own session" },
   "GET /auth/session": { access: "public", note: "session introspection" },
   "GET /health": { access: "public", note: "liveness probe" },
+  "GET /config/deal-defaults": {
+    access: "public",
+    note: "deployment-derived public policy binding; contains no private data",
+  },
 
   // ---- drafts ----
   "POST /drafts": { access: "public", note: "anonymous drafting allowed; creator bound to session when present" },

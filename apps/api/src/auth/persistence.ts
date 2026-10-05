@@ -209,6 +209,10 @@ export interface AuthKvStore {
   authPut(scope: string, key: string, value: unknown, expiresAt?: string | null): Promise<void>;
   authDelete(scope: string, key: string): Promise<void>;
   authList(scope: string): Promise<Array<{ key: string; value: unknown; expiresAt?: string | null }>>;
+  /** Atomic delete-and-return; required for single-use challenge consumption. */
+  authConsume?(scope: string, key: string): Promise<unknown | null>;
+  /** Row-locked read for compare-and-set inside `withTransaction`. */
+  authGetForUpdate?(scope: string, key: string): Promise<unknown | null>;
   withTransaction?<T>(fn: (store: AuthKvStore) => Promise<T>): Promise<T>;
 }
 
@@ -237,8 +241,15 @@ export function createStoreAuthPersistence(store: AuthKvStore): AuthPersistence 
     },
     async delConsumeChallenge(nonce) {
       const key = nonce.toLowerCase();
+      // Preferred path: a single DELETE ... RETURNING is atomic even without an
+      // explicit transaction, so concurrent verifies cannot both win.
+      if (typeof store.authConsume === "function") {
+        return (await store.authConsume(SCOPE.challenge, key)) as PersistedChallenge | null;
+      }
+      // Fallback (legacy adapters): lock the row to serialize the read+delete.
       const run = async (tx: AuthKvStore) => {
-        const record = (await tx.authGet(SCOPE.challenge, key)) as PersistedChallenge | null;
+        const reader = tx.authGetForUpdate ?? tx.authGet;
+        const record = (await reader.call(tx, SCOPE.challenge, key)) as PersistedChallenge | null;
         if (record) await tx.authDelete(SCOPE.challenge, key);
         return record;
       };
@@ -262,7 +273,10 @@ export function createStoreAuthPersistence(store: AuthKvStore): AuthPersistence 
     async redeemInvitation(draftId, input) {
       const key = draftId.toLowerCase();
       const run = async (tx: AuthKvStore): Promise<RedeemInvitationResult> => {
-        const record = (await tx.authGet(SCOPE.invitation, key)) as StoredInvitation | null;
+        // Row-locked read: a second transaction blocks until the first commits,
+        // then observes `consumed` and loses the CAS.
+        const reader = tx.authGetForUpdate ?? tx.authGet;
+        const record = (await reader.call(tx, SCOPE.invitation, key)) as StoredInvitation | null;
         if (!record) return { ok: false, reason: "unknown" };
         if (record.revoked) return { ok: false, reason: "revoked" };
         if (record.consumed) return { ok: false, reason: "consumed" };
@@ -288,7 +302,8 @@ export function createStoreAuthPersistence(store: AuthKvStore): AuthPersistence 
     async revokeInvitation(draftId) {
       const key = draftId.toLowerCase();
       const run = async (tx: AuthKvStore) => {
-        const record = (await tx.authGet(SCOPE.invitation, key)) as StoredInvitation | null;
+        const reader = tx.authGetForUpdate ?? tx.authGet;
+        const record = (await reader.call(tx, SCOPE.invitation, key)) as StoredInvitation | null;
         if (record) await tx.authPut(SCOPE.invitation, key, { ...record, revoked: true }, record.expiresAt);
       };
       await (store.withTransaction ? store.withTransaction(run) : run(store));

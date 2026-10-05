@@ -116,7 +116,9 @@ contract HubHandler is Test {
         t.deliveryPeriodSeconds = 3_600;
         t.inspectionPeriodSeconds = 3_600;
         t.categoryPolicyId = categoryPolicy;
+        // pids[2] is the readiness policy; the handler's short deals require it.
         t.readinessPolicyId = noReadiness;
+        t.readinessConsentHash = keccak256("inv-consent");
         t.evidencePolicyId = evidencePolicy;
         t.bondPolicyId = bondPolicy;
         t.arbitrationPolicyId = arbPolicy;
@@ -137,11 +139,11 @@ contract HubHandler is Test {
         bytes32 admissionNonce = keccak256(abi.encode("inv-adm", dealCounter));
         bytes32 adigest = hub.actionDigest(
             keccak256(
-                abi.encode(MidmanDK.ADMISSION_TYPEHASH, digest, bytes32(0), admissionNonce, uint64(block.timestamp + 1 days), true)
+                abi.encode(MidmanDK.ADMISSION_TYPEHASH, digest, t.categoryPolicyId, admissionNonce, uint64(block.timestamp + 1 days), true)
             )
         );
         Admission memory adm = Admission({
-            minPolicyId: bytes32(0),
+            minPolicyId: t.categoryPolicyId,
             admissionNonce: admissionNonce,
             expiresAt: uint64(block.timestamp + 1 days),
             signature: _sig(admissionPk, adigest)
@@ -159,7 +161,24 @@ contract HubHandler is Test {
             signature: _sig(buyerPk, idigest)
         });
         ReadinessAuth memory ready;
-        // solhint-disable-next-line no-empty-blocks
+        {
+            uint64 rattested = uint64(block.timestamp);
+            uint64 rexp = uint64(block.timestamp + 2 hours);
+            bytes32 rnonce = keccak256(abi.encode("inv-ready", dealCounter));
+            bytes32 rdigest = hub.actionDigest(
+                keccak256(
+                    abi.encode(
+                        MidmanDK.READINESS_TYPEHASH, t.dealId, digest, buyer, rattested, rnonce, rexp
+                    )
+                )
+            );
+            ready = ReadinessAuth({
+                attestedAt: rattested,
+                nonce: rnonce,
+                expiresAt: rexp,
+                signature: _sig(buyerPk, rdigest)
+            });
+        }
         {
             Payment3009 memory nopay;
             vm.prank(buyer);

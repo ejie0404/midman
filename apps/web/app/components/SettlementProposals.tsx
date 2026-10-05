@@ -160,6 +160,28 @@ export default function SettlementProposals({
         claimantBondUnits: claimantBond,
         respondentBondUnits: respondentBond,
       });
+      // Sign the authoritative envelope FIRST, then publish the proposal. The
+      // counterparty later countersigns the SAME envelope.
+      const expiresAt = Math.floor(Date.now() / 1_000) + 3_600;
+      const envelope = buildMutualSettlementTypedData({
+        chainId,
+        hub,
+        dealId,
+        agreementDigest,
+        sellerAwardUnits,
+        buyerCostUnits: costs.buyerCostUnits,
+        sellerCostUnits: costs.sellerCostUnits,
+        expectedPhase,
+        settlementNonce: nonce,
+        expiresAt,
+      });
+      const account = await getAccount();
+      const client = getWalletClient();
+      const proposerSignature = await signTypedDataWithWallet(
+        { signTypedData: (args) => (client.signTypedData as (a: unknown) => Promise<string>)(args) },
+        account,
+        { ...envelope, message: normalizeTypedDataMessage(envelope) },
+      );
       await proposeSettlement(
         dealId,
         {
@@ -168,6 +190,10 @@ export default function SettlementProposals({
           sellerCostUnits: costs.sellerCostUnits,
           expectedPhase,
           settlementNonce: nonce,
+          proposerSignature,
+          expiresAt,
+          chainId,
+          hub,
           principalUnits,
           claimantBondUnits: claimantBond,
           respondentBondUnits: respondentBond,

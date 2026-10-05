@@ -161,11 +161,11 @@ export function mutualSignableMessage(proposal: Pick<
   };
 }
 
-export function proposeSettlement(
+export async function proposeSettlement(
   dealId: string,
   input: ProposeSettlementInput,
   ctx?: ProposalContext,
-): SettlementProposal {
+): Promise<SettlementProposal> {
   if (!BYTES32_RE.test(dealId)) throw httpError(400, "Invalid dealId");
   if (typeof input.proposer !== "string" || !ADDRESS_RE.test(input.proposer)) {
     throw httpError(400, "Invalid proposer");
@@ -240,8 +240,8 @@ export function proposeSettlement(
   if (!UNITS_RE.test(expiresStr) || BigInt(expiresStr) <= BigInt(nowSeconds)) {
     throw httpError(400, "expiresAt must be in the future");
   }
-  if (input.proposerSignature !== undefined && !HEX_RE.test(input.proposerSignature)) {
-    throw httpError(400, "Invalid proposerSignature");
+  if (typeof input.proposerSignature !== "string" || !HEX_RE.test(input.proposerSignature)) {
+    throw httpError(400, "proposerSignature (over the settlement envelope) is required");
   }
 
   const chainId = input.chainId ?? ctx?.chainId ?? Number(process.env["CHAIN_ID"] ?? "8453");
@@ -249,8 +249,10 @@ export function proposeSettlement(
   const hub = input.hub ?? (ctx?.hub as string | undefined) ?? process.env["HUB_ADDRESS"] ?? "";
   if (!ADDRESS_RE.test(hub)) throw httpError(400, "hub required (chainId + hub bind the settlement signature)");
 
-  proposalCounter += 1;
-  const id = `prop_${proposalCounter.toString().padStart(4, "0")}`;
+  // Durable id allocation: two instances cannot mint the same proposal id.
+  const seq = await writer.nextSeq(PROPOSAL_NS);
+  proposalCounter = Math.max(proposalCounter, seq);
+  const id = `prop_${seq.toString().padStart(4, "0")}`;
   const proposal: SettlementProposal = {
     id,
     dealId,
@@ -268,15 +270,33 @@ export function proposeSettlement(
     claimantBond: (claimantBond as bigint).toString(),
     respondentBond: (respondentBond as bigint).toString(),
     bondsUnverified,
-    proposerSignature: input.proposerSignature ?? null,
+    proposerSignature: input.proposerSignature,
     chainId: chainId as number,
     hub,
     status: "open",
     createdAt: new Date().toISOString(),
   };
+  // Verify the proposer signed THIS exact envelope before publishing, so the
+  // counterparty countersignature later completes against the same terms.
+  let proposerRecovered: Address;
+  try {
+    proposerRecovered = await recoverTypedDataAddress({
+      domain: { name: "MidmanEscrow", version: "1", chainId: chainId as number, verifyingContract: hub as Address },
+      types: MUTUAL_TYPES,
+      primaryType: "MutualSettlement",
+      message: mutualSignableMessage(proposal),
+      signature: input.proposerSignature as Hash,
+    });
+  } catch {
+    throw httpError(400, "Unrecoverable proposerSignature");
+  }
+  if (proposerRecovered.toLowerCase() !== input.proposer.toLowerCase()) {
+    throw httpError(400, "proposerSignature does not recover to the proposer");
+  }
+  // Await the durable write: a blocked/failed write must not be acknowledged.
+  await writer.put(PROPOSAL_NS, dealId.toLowerCase(), id, proposal);
   proposalsById.set(id, proposal);
   proposalOrder.push(id);
-  void writer.put(PROPOSAL_NS, dealId.toLowerCase(), id, proposal);
   return { ...proposal };
 }
 
@@ -407,4 +427,5 @@ export function __resetProposalsForTests(): void {
   proposalOrder.length = 0;
   proposalCounter = 0;
   writer.setAdapter(null);
+  writer.resetSequences();
 }

@@ -57,6 +57,7 @@ contract ForkTest is Test {
     bytes32 feePolicy = keccak256("FEEv1");
     bytes32 categoryPolicy = keccak256("CATv1");
     bytes32 noReadiness = keccak256("READY-NONE");
+    bytes32 readinessPolicy = keccak256("READY-REQ");
     bytes32 evidencePolicy = keccak256("EVIv1");
     bytes32 bondPolicy = keccak256("BONDv1");
     bytes32 arbPolicy = keccak256("ARBv1");
@@ -90,6 +91,7 @@ contract ForkTest is Test {
         policies.registerFeePolicy(feePolicy, keccak256("fee"));
         policies.registerCategoryPolicy(categoryPolicy, keccak256("cat"), 3_600);
         policies.registerReadinessPolicy(noReadiness, keccak256("r"), false);
+        policies.registerReadinessPolicy(readinessPolicy, keccak256("rr"), true);
         policies.registerEvidencePolicy(evidencePolicy, keccak256("e"));
         policies.registerBondPolicy(bondPolicy, keccak256("b"), 5_000_000, 5_000_000);
         policies.registerArbitrationPolicy(arbPolicy, keccak256("a"), 0x07);
@@ -134,7 +136,8 @@ contract ForkTest is Test {
         t.deliveryPeriodSeconds = 3_600;
         t.inspectionPeriodSeconds = 3_600;
         t.categoryPolicyId = categoryPolicy;
-        t.readinessPolicyId = noReadiness;
+        t.readinessPolicyId = readinessPolicy;
+        t.readinessConsentHash = keccak256("fork-consent");
         t.evidencePolicyId = evidencePolicy;
         t.bondPolicyId = bondPolicy;
         t.arbitrationPolicyId = arbPolicy;
@@ -151,9 +154,23 @@ contract ForkTest is Test {
     function _admission(bytes32 digest) internal returns (Admission memory adm) {
         bytes32 n = keccak256(abi.encode("fork-adm", digest));
         bytes32 d = hub.actionDigest(
-            keccak256(abi.encode(MidmanDK.ADMISSION_TYPEHASH, digest, bytes32(0), n, uint64(block.timestamp + 1 days), true))
+            keccak256(abi.encode(MidmanDK.ADMISSION_TYPEHASH, digest, categoryPolicy, n, uint64(block.timestamp + 1 days), true))
         );
-        adm = Admission({minPolicyId: bytes32(0), admissionNonce: n, expiresAt: uint64(block.timestamp + 1 days), signature: _sig(admissionPk, d)});
+        adm = Admission({minPolicyId: categoryPolicy, admissionNonce: n, expiresAt: uint64(block.timestamp + 1 days), signature: _sig(admissionPk, d)});
+    }
+
+    function _readiness(DealTerms memory t, bytes32 digest) internal view returns (ReadinessAuth memory r) {
+        uint64 attestedAt = uint64(block.timestamp);
+        uint64 expiresAt = uint64(block.timestamp + 2 hours);
+        bytes32 nonce = keccak256(abi.encode("fork-ready", t.dealId));
+        bytes32 rdigest = hub.actionDigest(
+            keccak256(
+                abi.encode(
+                    MidmanDK.READINESS_TYPEHASH, t.dealId, digest, t.buyerAddress, attestedAt, nonce, expiresAt
+                )
+            )
+        );
+        r = ReadinessAuth({attestedAt: attestedAt, nonce: nonce, expiresAt: expiresAt, signature: _sig(buyerPk, rdigest)});
     }
 
     function testFork_Capabilities() public onlyFork {
@@ -189,7 +206,7 @@ contract ForkTest is Test {
             signature: _sig(buyerPk, idigest)
         });
         Payment3009 memory nopay;
-        ReadinessAuth memory ready;
+        ReadinessAuth memory ready = _readiness(t, digest);
         hub.fund(t, _sig(buyerPk, digest), _sig(sellerPk, digest), nopay, intent, _admission(digest), ready);
         assertEq(hub.totalLiabilities(), P, "real USDC held");
         vm.prank(seller);
@@ -231,18 +248,22 @@ contract ForkTest is Test {
             use3009: true
         });
         AllowanceIntent memory empty;
-        ReadinessAuth memory ready;
+        ReadinessAuth memory ready = _readiness(t, digest);
         hub.fund(t, _sig(buyerPk, digest), _sig(sellerPk, digest), pay, empty, _admission(digest), ready);
         assertTrue(IRealUSDC(REAL_USDC).authorizationState(buyer, tokenNonce), "nonce consumed");
         assertEq(IRealUSDC(REAL_USDC).balanceOf(address(hub)), P, "atomic receipt");
     }
 
     function testFork_RealOutageRecorded() public onlyFork {
+        // Coverage watermark is seeded from the live head at deploy, so the
+        // historical outage below the head cannot be injected out of order.
+        (uint80 head, int256 ans,,,) = IFeedLike(REAL_FEED).latestRoundData();
+        assertEq(policies.lastAuditedRound(), ans == 0 ? head : head - 1, "watermark seeded to live head");
+        vm.expectRevert(MidmanPolicies.BadPanel.selector);
         policies.reportOutage(DOWN_ROUND);
-        (uint64 s, uint64 e) = policies.outageAt(0);
-        assertEq(s, DOWN_START, "recorded start");
-        assertEq(e, UP_START, "recorded end");
-        // Funding after a historical outage is unaffected; escape math unchanged.
+        assertEq(policies.outageCount(), 0, "pre-head outage not recorded");
+
+        // Funding after deploy is unaffected by that historical outage.
         _credit(buyer, P);
         DealTerms memory t = _terms();
         bytes32 digest = hub.agreementDigestOf(t);
@@ -261,7 +282,7 @@ contract ForkTest is Test {
             signature: _sig(buyerPk, idigest)
         });
         Payment3009 memory nopay;
-        ReadinessAuth memory ready;
+        ReadinessAuth memory ready = _readiness(t, digest);
         hub.fund(t, _sig(buyerPk, digest), _sig(sellerPk, digest), nopay, intent, _admission(digest), ready);
         vm.prank(seller);
         hub.markDelivered(t.dealId, keccak256("m"), bytes32(0), 0, new bytes(0));

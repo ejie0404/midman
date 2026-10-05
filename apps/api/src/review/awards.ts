@@ -8,6 +8,11 @@
 import { hashTypedData, type Address, type Hash, type Hex } from "viem";
 import { TYPES as EIP712_TYPES } from "@midman/chain";
 import { normalSettlement, partialBondCosts } from "@midman/shared";
+import { DurableCollection, RegistryWriter, type RegistryAdapter } from "@midman/store";
+
+const AWARD_NS = "review.award-drafts";
+const writer = new RegistryWriter();
+const drafts = new DurableCollection<AwardDraft>(AWARD_NS, writer, (draft) => draft.rulingDigest.toLowerCase());
 
 export const RULING_TYPES = {
   Ruling: EIP712_TYPES.Ruling,
@@ -144,14 +149,28 @@ export function rulingSignableMessage(draft: Pick<
   };
 }
 
-const draftsByDeal = new Map<string, AwardDraft[]>();
+/** Switch award drafts to durable mode and rehydrate. Wired in server.ts. */
+export async function configureRegistry(adapter: RegistryAdapter | null, dealIds?: string[]): Promise<void> {
+  writer.setAdapter(adapter);
+  await drafts.hydrate(dealIds);
+}
+
+/** Sync test hook: attach an adapter without hydrating. */
+export function __setRegistryForTests(adapter: RegistryAdapter | null): void {
+  writer.setAdapter(adapter);
+}
+
+/** Await queued durable writes (tests only). */
+export function __flushAwardsForTests(): Promise<void> {
+  return writer.flush();
+}
 
 /**
  * Draft an award. Validates 0 <= S <= P, derives Cb/Cs exactly, previews the
  * earned fee, and returns the EIP-712 Ruling typed-data envelope plus its
- * digest. The draft is stored under dealId for approval matching.
+ * digest. The draft is persisted under (dealId, rulingDigest) before return.
  */
-export function draftAward(input: DraftAwardInput): AwardDraft {
+export async function draftAward(input: DraftAwardInput): Promise<AwardDraft> {
   const dealId = bytes32(input.dealId, "dealId");
   const agreementDigest = bytes32(input.agreementDigest, "agreementDigest");
   const arbitrationPolicyId = bytes32(input.arbitrationPolicyId, "arbitrationPolicyId");
@@ -238,28 +257,29 @@ export function draftAward(input: DraftAwardInput): AwardDraft {
     },
     createdAt: new Date().toISOString(),
   };
-  const list = draftsByDeal.get(dealId.toLowerCase()) ?? [];
-  list.push(draft);
-  draftsByDeal.set(dealId.toLowerCase(), list);
+  // Await the durable commit before returning, so a restart (or a second
+  // instance) can still match an approval against this draft.
+  await drafts.set(dealId.toLowerCase(), draft.rulingDigest.toLowerCase(), draft);
   return { ...draft, message: { ...draft.message } };
 }
 
 export function getAwardDrafts(dealId: string): AwardDraft[] {
-  return (draftsByDeal.get(dealId.toLowerCase()) ?? []).map((draft) => ({
+  return drafts.list(dealId.toLowerCase()).map((draft) => ({
     ...draft,
     message: { ...draft.message },
   }));
 }
 
 export function findAwardDraft(dealId: string, rulingDigest: string): AwardDraft | null {
-  const list = draftsByDeal.get(dealId.toLowerCase()) ?? [];
-  const found = list.find((draft) => draft.rulingDigest.toLowerCase() === rulingDigest.toLowerCase());
+  const found = drafts.get(dealId.toLowerCase(), rulingDigest.toLowerCase());
   return found ? { ...found, message: { ...found.message } } : null;
 }
 
 /** Test-only reset (drops all stored drafts). */
 export function __resetAwardsForTests(): void {
-  draftsByDeal.clear();
+  drafts.clear();
+  writer.setAdapter(null);
+  writer.resetSequences();
 }
 
 export type HexString = Hex;

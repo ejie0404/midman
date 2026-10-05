@@ -64,13 +64,27 @@ Both `openDispute` (`now < effInspection`) and `finalizeAfterTimeout`
   out an interval a live clock still needs.
 - `MAX_RETAINED = 256` retained interval bound; once exceeded the ledger sets
   `outageSaturated = true`.
+- `lastAuditedRound` — the **sequential coverage watermark**. A Chainlink uptime
+  feed mints a round on every status transition (up→down or down→up), so round
+  ids are consecutive. The watermark is seeded at construction from the live head
+  and advanced ONLY by `reportOutage`, which must consume the next un-audited down
+  round (`roundId == lastAuditedRound + 1`) together with its recovery. An
+  outage that recovered but was never reported therefore leaves the watermark
+  behind the head, which is the on-chain proof that the retained ledger is
+  incomplete. Before the watermark existed, deadline math ran over an
+  under-reported ledger and could settle a still-open clock.
 
 `effectiveDeadline` returns **BOTH** the deadline and `available`. `available`
 is `false` when (i) the clock's anchor precedes `prunedBefore`, (ii) the ledger
-is saturated, (iii) the fixpoint does not converge within `MAX_PASSES`, or
-(iv) a required feed read for the live trailing interval is malformed. Missing
-or uncertain history therefore surfaces as **UNKNOWN, never as a shorter
-deadline**.
+is saturated, (iii) the fixpoint does not converge within `MAX_PASSES`,
+(iv) a required feed read for the live trailing interval is malformed, or
+(v) the coverage watermark is not synced to the feed head (an up head requires
+`lastAuditedRound == head`; a down head is the ongoing outage, covered by live
+trailing, and requires `lastAuditedRound == head - 1`). Missing or uncertain
+history therefore surfaces as **UNKNOWN, never as a shorter deadline**. Timeout
+and settlement paths revert `OutageUnknown` until the (permissionless) transition
+reports make history complete; admission stays fail-open against the ORIGINAL
+deadline.
 
 Constants: `GRACE` = policy grace (canonical 1800s), `MAX_HISTORY_AGE` =
 180 days (comfortably longer than the 60-day escape horizon),
@@ -143,6 +157,12 @@ required history/feed is missing. `escapeAt` stays fixed at
 9. Retention: absolute-age pruning marks a pre-`prunedBefore` anchor
    unavailable; duplicates stay rejected after pruning; a saturated ledger
    reports unavailable instead of a shorter deadline.
+10. Unreported/partial history: one or more outages that recovered without
+    `reportOutage` leave the coverage watermark behind the head;
+    `effectiveDeadlines` reports unavailable and `finalizeAfterTimeout` reverts
+    `OutageUnknown` until every transition is consumed in order. This is the
+    passing regression for the round-2 finding that an under-reported ledger
+    previously permitted premature settlement.
 
 Measurements: adjustment gas for `effectiveDeadlines` at 0/1/4/16 intervals is
 recorded by `test/OutageDeadline.t.sol` (0 ≈ 169k, 1 ≈ 190k, 4 ≈ 252k,

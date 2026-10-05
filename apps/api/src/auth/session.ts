@@ -109,14 +109,29 @@ export function verifySessionToken(token: string, secret: string = sessionSecret
 
 const revokedNonces = new Set<string>();
 
-/** Revoke a session nonce (logout / compromise). Mirrored to AuthPersistence. */
-export function revokeSessionNonce(nonce: string): void {
+/**
+ * Revoke a session nonce (logout / compromise). The durable write is AWAITED
+ * before returning, so a caller that awaits this can rely on the revocation
+ * being visible to every API instance immediately afterwards.
+ */
+export async function revokeSessionNonce(nonce: string): Promise<void> {
+  await getAuthPersistence().revokeSession(nonce);
   revokedNonces.add(nonce);
-  void getAuthPersistence().revokeSession(nonce);
 }
 
 export function isSessionNonceRevoked(nonce: string): boolean {
   return revokedNonces.has(nonce);
+}
+
+/**
+ * Cross-instance revocation check: local deny-list fast path, then the durable
+ * adapter. A nonce revoked on another instance is observed here.
+ */
+export async function isSessionNonceRevokedDurable(nonce: string): Promise<boolean> {
+  if (revokedNonces.has(nonce)) return true;
+  const revoked = await getAuthPersistence().isRevoked(nonce);
+  if (revoked) revokedNonces.add(nonce);
+  return revoked;
 }
 
 /** Rebuild the local deny-list from the durable adapter (restart / Phase 3). */

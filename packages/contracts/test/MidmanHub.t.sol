@@ -57,6 +57,7 @@ contract MidmanHubTest is Test {
     bytes32 feePolicy = keccak256("FEEv1");
     bytes32 categoryPolicy = keccak256("CATv1");
     bytes32 noReadiness = keccak256("READY-NONE");
+    bytes32 readinessPolicy = keccak256("READY-REQ");
     bytes32 evidencePolicy = keccak256("EVIv1");
     bytes32 bondPolicy = keccak256("BONDv1");
     bytes32 arbPolicy = keccak256("ARBv1");
@@ -89,6 +90,7 @@ contract MidmanHubTest is Test {
         policies.registerFeePolicy(feePolicy, keccak256("fee-content"));
         policies.registerCategoryPolicy(categoryPolicy, keccak256("cat-content"), 3_600);
         policies.registerReadinessPolicy(noReadiness, keccak256("ready-content"), false);
+        policies.registerReadinessPolicy(readinessPolicy, keccak256("ready-req-content"), true);
         policies.registerEvidencePolicy(evidencePolicy, keccak256("evi-content"));
         policies.registerBondPolicy(bondPolicy, keccak256("bond-content"), 5_000_000, 5_000_000);
         policies.registerArbitrationPolicy(arbPolicy, keccak256("arb-content"), 0x07);
@@ -122,8 +124,9 @@ contract MidmanHubTest is Test {
         t.deliveryPeriodSeconds = 3_600;
         t.inspectionPeriodSeconds = 3_600;
         t.categoryPolicyId = categoryPolicy;
-        t.readinessPolicyId = noReadiness;
-        t.readinessConsentHash = bytes32(0);
+        // 7200s duration is the <=3h pricing tier, so readiness is required.
+        t.readinessPolicyId = readinessPolicy;
+        t.readinessConsentHash = keccak256("ready-consent");
         t.evidencePolicyId = evidencePolicy;
         t.bondPolicyId = bondPolicy;
         t.arbitrationPolicyId = arbPolicy;
@@ -147,6 +150,26 @@ contract MidmanHubTest is Test {
     function _sig(uint256 pk, bytes32 digest) internal pure returns (bytes memory) {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    /// @notice Buyer-signed readiness consent bound to this deal's agreement.
+    /// The base fixture uses a <=3h duration, so P-11 requires readiness.
+    function _readinessAuth(DealTerms memory t, bytes32 agreementDigest)
+        internal
+        view
+        returns (ReadinessAuth memory r)
+    {
+        uint64 attestedAt = uint64(block.timestamp);
+        uint64 expiresAt = uint64(block.timestamp + 2 hours);
+        bytes32 nonce = keccak256(abi.encode("ready", t.dealId));
+        bytes32 rdigest = hub.actionDigest(
+            keccak256(
+                abi.encode(
+                    MidmanDK.READINESS_TYPEHASH, t.dealId, agreementDigest, t.buyerAddress, attestedAt, nonce, expiresAt
+                )
+            )
+        );
+        r = ReadinessAuth({attestedAt: attestedAt, nonce: nonce, expiresAt: expiresAt, signature: _sig(buyerPk, rdigest)});
     }
 
     /// @notice Empty reserve authorization for fresh-token bond paths (only
@@ -216,15 +239,15 @@ contract MidmanHubTest is Test {
         amount = _fundedAmount(t);
         bytes32 admissionNonce = keccak256(abi.encode("adm", t.dealId));
         bytes32 adigest = hub.actionDigest(
-            keccak256(abi.encode(MidmanDK.ADMISSION_TYPEHASH, digest, bytes32(0), admissionNonce, uint64(block.timestamp + 1 days), true))
+            keccak256(abi.encode(MidmanDK.ADMISSION_TYPEHASH, digest, t.categoryPolicyId, admissionNonce, uint64(block.timestamp + 1 days), true))
         );
         adm = Admission({
-            minPolicyId: bytes32(0),
+            minPolicyId: t.categoryPolicyId,
             admissionNonce: admissionNonce,
             expiresAt: uint64(block.timestamp + 1 days),
             signature: _sig(admissionPk, adigest)
         });
-        ready = ReadinessAuth({attestedAt: 0, nonce: bytes32(0), expiresAt: 0, signature: new bytes(0)});
+        ready = _readinessAuth(t, digest);
         if (use3009) {
             bytes32 salt = keccak256(abi.encode("pay", t.dealId));
             bytes32 tokenNonce = keccak256(abi.encode(t.dealId, digest, salt));
@@ -265,16 +288,15 @@ contract MidmanHubTest is Test {
 
         bytes32 admissionNonce = keccak256(abi.encode("adm", t.dealId));
         bytes32 adigest = hub.actionDigest(
-            keccak256(abi.encode(MidmanDK.ADMISSION_TYPEHASH, digest, bytes32(0), admissionNonce, uint64(block.timestamp + 1 days), true))
+            keccak256(abi.encode(MidmanDK.ADMISSION_TYPEHASH, digest, t.categoryPolicyId, admissionNonce, uint64(block.timestamp + 1 days), true))
         );
         Admission memory adm = Admission({
-            minPolicyId: bytes32(0),
+            minPolicyId: t.categoryPolicyId,
             admissionNonce: admissionNonce,
             expiresAt: uint64(block.timestamp + 1 days),
             signature: _sig(admissionPk, adigest)
         });
-        ReadinessAuth memory ready =
-            ReadinessAuth({attestedAt: 0, nonce: bytes32(0), expiresAt: 0, signature: new bytes(0)});
+        ReadinessAuth memory ready = _readinessAuth(t, digest);
 
         if (use3009) {
             bytes32 salt = keccak256(abi.encode("pay", t.dealId));
@@ -442,10 +464,10 @@ contract MidmanHubTest is Test {
         });
         bytes32 admissionNonce = keccak256("adm-b");
         bytes32 adigest = hub.actionDigest(
-            keccak256(abi.encode(MidmanDK.ADMISSION_TYPEHASH, digestB, bytes32(0), admissionNonce, uint64(block.timestamp + 1 days), true))
+            keccak256(abi.encode(MidmanDK.ADMISSION_TYPEHASH, digestB, b.categoryPolicyId, admissionNonce, uint64(block.timestamp + 1 days), true))
         );
         Admission memory adm = Admission({
-            minPolicyId: bytes32(0),
+            minPolicyId: b.categoryPolicyId,
             admissionNonce: admissionNonce,
             expiresAt: uint64(block.timestamp + 1 days),
             signature: _sig(admissionPk, adigest)

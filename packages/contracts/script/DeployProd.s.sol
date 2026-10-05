@@ -59,6 +59,16 @@ library DeployPolicyIds {
     bytes32 internal constant ARBITRATION = keccak256("MIDMAN.ARBITRATION.ALL.v1");
     bytes32 internal constant OUTAGE = keccak256("MIDMAN.OUTAGE.v1");
     bytes32 internal constant CATASTROPHIC = keccak256("MIDMAN.CATASTROPHIC.v1");
+
+    // Approved per-category minimum-inspection matrix (six V1 categories).
+    bytes32 internal constant CATEGORY_INSTANT_CODE = keccak256("MIDMAN.CATEGORY.INSTANT_CODE.v1");
+    bytes32 internal constant CATEGORY_GAME_ITEM = keccak256("MIDMAN.CATEGORY.GAME_ITEM.v1");
+    bytes32 internal constant CATEGORY_GAME_CURRENCY = keccak256("MIDMAN.CATEGORY.GAME_CURRENCY.v1");
+    bytes32 internal constant CATEGORY_DIGITAL_GOOD = keccak256("MIDMAN.CATEGORY.DIGITAL_GOOD.v1");
+    bytes32 internal constant CATEGORY_SERVICE = keccak256("MIDMAN.CATEGORY.SERVICE.v1");
+    bytes32 internal constant CATEGORY_GAME_ACCOUNT = keccak256("MIDMAN.CATEGORY.GAME_ACCOUNT.v1");
+    // Readiness-required policy for the <=3h pricing tier.
+    bytes32 internal constant READINESS_REQUIRED = keccak256("MIDMAN.READINESS.REQUIRED.v1");
 }
 
 /// @notice Canonical on-chain policy VALUES, identical to the reviewed
@@ -70,8 +80,17 @@ library DeployPolicyIds {
 library DeployPolicyValues {
     // category-v1: canonical INSTANT_CODE minimum inspection window.
     uint32 internal constant CATEGORY_MIN_INSPECTION = 3_600;
+    // Approved per-category minimum inspection windows (P-10/P-12).
+    uint32 internal constant CATEGORY_MIN_INSTANT_CODE = 3_600;
+    uint32 internal constant CATEGORY_MIN_GAME_ITEM = 43_200;
+    uint32 internal constant CATEGORY_MIN_GAME_CURRENCY = 43_200;
+    uint32 internal constant CATEGORY_MIN_DIGITAL_GOOD = 43_200;
+    uint32 internal constant CATEGORY_MIN_SERVICE = 43_200;
+    uint32 internal constant CATEGORY_MIN_GAME_ACCOUNT = 86_400;
     // readiness-v1: canonical no-readiness marker (required == false).
     bool internal constant READINESS_REQUIRED = false;
+    // readiness-required marker for the <=3h pricing tier (required == true).
+    bool internal constant READINESS_REQUIRED_FLAG = true;
     // bond-v1: 5 USDC (6 decimals) per contesting party.
     uint256 internal constant BOND_CLAIMANT = 5_000_000;
     uint256 internal constant BOND_RESPONDENT = 5_000_000;
@@ -147,6 +166,40 @@ abstract contract DeployProdBase {
         require(value != address(0), string.concat("DeployProd: ", label, " required and non-zero"));
     }
 
+    /// @notice Deterministic per-variant content commitment derived from the
+    /// canonical category/readiness record hash + variant name.
+    function _derived(bytes32 base, string memory name) internal pure returns (bytes32) {
+        return keccak256(abi.encode(base, name));
+    }
+
+    /// @notice Register the six approved category minimums.
+    function _registerCategoryMatrix(MidmanPolicies policies, bytes32 base) internal {
+        policies.registerCategoryPolicy(
+            DeployPolicyIds.CATEGORY_INSTANT_CODE, _derived(base, "INSTANT_CODE"), DeployPolicyValues.CATEGORY_MIN_INSTANT_CODE
+        );
+        policies.registerCategoryPolicy(
+            DeployPolicyIds.CATEGORY_GAME_ITEM, _derived(base, "GAME_ITEM"), DeployPolicyValues.CATEGORY_MIN_GAME_ITEM
+        );
+        policies.registerCategoryPolicy(
+            DeployPolicyIds.CATEGORY_GAME_CURRENCY,
+            _derived(base, "GAME_CURRENCY"),
+            DeployPolicyValues.CATEGORY_MIN_GAME_CURRENCY
+        );
+        policies.registerCategoryPolicy(
+            DeployPolicyIds.CATEGORY_DIGITAL_GOOD,
+            _derived(base, "DIGITAL_GOOD"),
+            DeployPolicyValues.CATEGORY_MIN_DIGITAL_GOOD
+        );
+        policies.registerCategoryPolicy(
+            DeployPolicyIds.CATEGORY_SERVICE, _derived(base, "SERVICE"), DeployPolicyValues.CATEGORY_MIN_SERVICE
+        );
+        policies.registerCategoryPolicy(
+            DeployPolicyIds.CATEGORY_GAME_ACCOUNT,
+            _derived(base, "GAME_ACCOUNT"),
+            DeployPolicyValues.CATEGORY_MIN_GAME_ACCOUNT
+        );
+    }
+
     function _validateProdPanels(address[] memory p, address[] memory f, address[] memory v) internal pure {
         require(p.length >= MIN_PRIMARY, "DeployProd: PANEL_PRIMARY needs >=5 members");
         require(f.length >= MIN_FALLBACK, "DeployProd: PANEL_FALLBACK needs >=5 members");
@@ -194,6 +247,14 @@ abstract contract DeployProdBase {
         );
         policies.registerReadinessPolicy(
             DeployPolicyIds.READINESS, c.readinessHash, DeployPolicyValues.READINESS_REQUIRED
+        );
+        // Approved category matrix: one policy per category with its minimum
+        // inspection window, plus the readiness-required variant for <=3h deals.
+        _registerCategoryMatrix(policies, c.categoryHash);
+        policies.registerReadinessPolicy(
+            DeployPolicyIds.READINESS_REQUIRED,
+            _derived(c.readinessHash, "REQUIRED"),
+            DeployPolicyValues.READINESS_REQUIRED_FLAG
         );
         policies.registerEvidencePolicy(DeployPolicyIds.EVIDENCE, c.evidenceHash);
         policies.registerBondPolicy(

@@ -326,7 +326,7 @@ export default function DeliverPage({ params }: { params: Promise<{ id: string }
                     style={{ display: "block", width: "100%", padding: 8, boxSizing: "border-box" }}
                   />
                 )}
-                {form.errors[field.name] ? <span style={{ color: "#8f1d1d" }}>{form.errors[field.name]}</span> : null}
+                {form.errors[field.name] ? <span style={{ color: "var(--danger)" }}>{form.errors[field.name]}</span> : null}
               </label>
             ))}
             {formSecretHit.hit ? (

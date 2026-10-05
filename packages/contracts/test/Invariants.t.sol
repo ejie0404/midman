@@ -23,8 +23,10 @@ contract InvariantSuite is StdInvariant, MidmanHubTest {
         sPks[0] = 0x5E21;
         sPks[1] = 0x5E22;
         sPks[2] = 0x5E23;
+        // pids[2] is the readiness policy; the 7200s invariant deals are the
+        // <=3h tier, so use the required policy (and supply consent below).
         bytes32[8] memory pids =
-            [feePolicy, categoryPolicy, noReadiness, evidencePolicy, bondPolicy, arbPolicy, outagePolicy, catPolicy];
+            [feePolicy, categoryPolicy, readinessPolicy, evidencePolicy, bondPolicy, arbPolicy, outagePolicy, catPolicy];
         handler = new HubHandler(
             hub, policies, usdc, bPks, sPks, primaryPks, fallbackPks, vetoPks, admissionPk, pids
         );

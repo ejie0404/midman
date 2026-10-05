@@ -182,6 +182,65 @@ function randomBoundary(): string {
     .join("")}`;
 }
 
+/** App/domain bound into metadata-bound evidence signatures. */
+const EVIDENCE_AUTH_APP = "midman";
+const EVIDENCE_AUTH_DOMAIN = "midman.local";
+
+/** Metadata-bound request fields (evidence mutations). */
+export interface EvidenceRequestMetadata {
+  readonly action: string;
+  readonly dealId: string;
+  readonly fileHash: string;
+  readonly filename: string;
+  readonly mime: string;
+  readonly size: string;
+}
+
+interface EvidenceMetadataMessage {
+  readonly app: string;
+  readonly domain: string;
+  readonly method: string;
+  readonly path: string;
+  readonly dealId: string;
+  readonly action: string;
+  readonly fileHash: string;
+  readonly filename: string;
+  readonly mime: string;
+  readonly size: string;
+  readonly bodySha256: string;
+  readonly nonce: string;
+  readonly expiry: string;
+}
+
+/** Byte-identical to the server's `buildMetadataSignedMessage`. */
+export function buildEvidenceMetadataMessage(meta: EvidenceMetadataMessage): string {
+  return [
+    "MidmanEvidenceAuth|v1",
+    `app: ${meta.app}`,
+    `domain: ${meta.domain}`,
+    `method: ${meta.method.toUpperCase()}`,
+    `path: ${meta.path}`,
+    `deal: ${meta.dealId}`,
+    `action: ${meta.action}`,
+    `fileHash: ${meta.fileHash}`,
+    `filename: ${meta.filename}`,
+    `mime: ${meta.mime}`,
+    `size: ${meta.size}`,
+    `bodySha256: ${meta.bodySha256}`,
+    `nonce: ${meta.nonce}`,
+    `expiry: ${meta.expiry}`,
+  ].join("\n");
+}
+
+/** 128-bit hex nonce (server requires 16-128 lowercase hex chars). */
+function randomNonceHex(): string {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 function sanitizeFilename(name: string): string {
   const base = name.split(/[\\/]/).pop() ?? "upload.bin";
   return base.replace(/["\r\n]/g, "_").slice(0, 180) || "upload.bin";
@@ -462,12 +521,51 @@ async function requestSigned<T>(args: {
   readonly signBody?: Uint8Array | undefined;
   /** sha256 (lowercase hex) of the file content; binds an upload to its bytes. */
   readonly contentSha256?: string | undefined;
+  /**
+   * Metadata-bound signature (evidence mutations). When set, the request is
+   * signed with the metadata format and the nonce/action/file/filename/mime/
+   * size headers are attached. Takes precedence over contentSha256.
+   */
+  readonly metadata?: EvidenceRequestMetadata | undefined;
   readonly contentType?: string | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
 }): Promise<T> {
   const fetchImpl = args.fetchImpl ?? fetch;
   let headers: Record<string, string>;
-  if (args.contentSha256 !== undefined) {
+  if (args.metadata !== undefined) {
+    const expiry = Math.floor(Date.now() / 1_000) + 300;
+    const bodyHash = await sha256hex(args.signBody ?? args.rawBody ?? new Uint8Array(0));
+    const nonce = randomNonceHex();
+    const message = buildEvidenceMetadataMessage({
+      app: EVIDENCE_AUTH_APP,
+      domain: EVIDENCE_AUTH_DOMAIN,
+      method: args.method,
+      path: args.path,
+      dealId: args.metadata.dealId,
+      action: args.metadata.action,
+      fileHash: args.metadata.fileHash,
+      filename: args.metadata.filename,
+      mime: args.metadata.mime,
+      size: args.metadata.size,
+      bodySha256: bodyHash,
+      nonce,
+      expiry: String(expiry),
+    });
+    const signature = await args.auth.signMessage(message);
+    headers = {
+      "x-wallet-address": args.auth.address,
+      "x-wallet-expiry": String(expiry),
+      "x-wallet-signature": signature,
+      "x-request-nonce": nonce,
+      "x-request-action": args.metadata.action,
+      "x-request-deal": args.metadata.dealId,
+      "x-request-file": args.metadata.fileHash,
+      "x-request-filename": args.metadata.filename,
+      "x-request-mime": args.metadata.mime,
+      "x-request-size": args.metadata.size,
+      "x-content-sha256": args.metadata.fileHash,
+    };
+  } else if (args.contentSha256 !== undefined) {
     // Content-bound upload signature (5-line). Multipart bodies are not
     // canonical, so the body hash is the empty-string hash.
     const expiry = Math.floor(Date.now() / 1_000) + 300;
@@ -584,13 +682,22 @@ export async function uploadEvidence(
     file: { name: input.fileName, contentType: input.contentType, bytes: input.fileBytes },
   });
   const contentSha256 = await sha256hex(input.fileBytes);
+  // Metadata-bound signature (server requires it for mutations): binds the
+  // deal, action, content hash and the parsed multipart filename/mime/size.
   return requestSigned<UploadEvidenceResult>({
     auth,
     method: "POST",
     path: `/deals/${encodeURIComponent(dealId)}/evidence`,
     rawBody: encoded.body,
     signBody: new Uint8Array(0),
-    contentSha256,
+    metadata: {
+      action: "evidence.upload",
+      dealId,
+      fileHash: contentSha256,
+      filename: sanitizeFilename(input.fileName),
+      mime: input.contentType || "application/octet-stream",
+      size: String(input.fileBytes.length),
+    },
     contentType: encoded.contentType,
     fetchImpl,
   });

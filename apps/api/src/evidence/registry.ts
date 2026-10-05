@@ -31,6 +31,7 @@ export type EvidenceKind = "delivery" | "dispute";
 
 // Durable namespaces (see packages/store/src/registry.ts). Values are JSON.
 const MANIFEST_NS = "evidence.manifest";
+const HEAD_NS = "evidence.manifest-head";
 const PURGE_NS = "evidence.purge-approvals";
 const SETTLEMENT_NS = "evidence.settlement";
 const TOMBSTONE_NS = "evidence.tombstones";
@@ -142,6 +143,12 @@ export interface AtomicAppendResult {
   readonly entry: ManifestEntry;
   /** False when an existing identical-content entry was returned (retry). */
   readonly created: boolean;
+}
+
+/** Authoritative per-deal append head; CAS-advanced so instances never collide. */
+interface ManifestHead {
+  readonly seq: number;
+  readonly head: string;
 }
 
 /** Genesis prevHash for the first manifest entry of a deal. */
@@ -321,18 +328,70 @@ export class InMemoryManifestRegistry implements ManifestRegistry {
     }
     if (!/^0x[0-9a-fA-F]+$/.test(input.fileHash)) throw httpError(400, "Invalid fileHash");
     const key = dealId.toLowerCase();
-    const list = this.entries.list(key);
-    const expectedPrev = list.length === 0 ? GENESIS_PREVHASH : (list[list.length - 1]?.head ?? GENESIS_PREVHASH);
-    if (input.prevHash.toLowerCase() !== expectedPrev.toLowerCase()) {
-      throw httpError(409, `prevHash mismatch: expected ${expectedPrev}`);
+    const adapter = this.writer.getAdapter();
+    if (!adapter) {
+      // No durable adapter: single-process path (unchanged behavior).
+      const list = this.entries.list(key);
+      const expectedPrev = list.length === 0 ? GENESIS_PREVHASH : (list[list.length - 1]?.head ?? GENESIS_PREVHASH);
+      if (input.prevHash.toLowerCase() !== expectedPrev.toLowerCase()) {
+        throw httpError(409, `prevHash mismatch: expected ${expectedPrev}`);
+      }
+      const raced = this.getByFileHash(dealId, input.fileHash);
+      if (raced) return { entry: raced, created: false };
+      const seq = list.length;
+      const entry = this.buildEntry(dealId, seq, input);
+      await this.entries.setAuthoritative(key, orderedKey(seq), entry);
+      return { entry: { ...entry }, created: true };
     }
-    // Re-check after any awaits above: a concurrent caller may have committed.
-    const raced = this.getByFileHash(dealId, input.fileHash);
-    if (raced) return { entry: raced, created: false };
-    const seq = list.length;
-    const entry = this.buildEntry(dealId, seq, input);
-    await this.entries.setAuthoritative(key, orderedKey(seq), entry);
-    return { entry: { ...entry }, created: true };
+
+    // Durable path: reserve the next sequence slot with a create-only write and
+    // advance the authoritative head with compare-and-set. A racing instance
+    // fails one of the two and retries against the new head.
+    const MAX_ATTEMPTS = 8;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const headRow = await this.writer.getVersioned<ManifestHead>(HEAD_NS, key, "head");
+      const current: ManifestHead = headRow?.value ?? { seq: 0, head: GENESIS_PREVHASH };
+      if (input.prevHash.toLowerCase() !== current.head.toLowerCase()) {
+        throw httpError(409, `prevHash mismatch: expected ${current.head}`);
+      }
+      const raced = this.getByFileHash(dealId, input.fileHash);
+      if (raced) return { entry: raced, created: false };
+
+      const entry = this.buildEntry(dealId, current.seq, input);
+      const slotCreated = await this.writer.putIfAbsent(MANIFEST_NS, key, orderedKey(current.seq), entry);
+      if (!slotCreated) {
+        // Another instance took this slot (or an unrelated entry already sits
+        // there): refresh from the authoritative store and retry.
+        await this.entries.refresh(key);
+        continue;
+      }
+
+      const nextHead: ManifestHead = { seq: current.seq + 1, head: entry.head };
+      try {
+        if (headRow) {
+          if (typeof adapter.putVersioned !== "function") {
+            throw httpError(500, "durable adapter cannot advance the manifest head");
+          }
+          await adapter.putVersioned(HEAD_NS, key, "head", nextHead, headRow.version);
+        } else {
+          const created = await this.writer.putIfAbsent(HEAD_NS, key, "head", nextHead);
+          if (!created) {
+            await this.writer.delete(MANIFEST_NS, key, orderedKey(current.seq));
+            await this.entries.refresh(key);
+            continue;
+          }
+        }
+      } catch {
+        // Head advanced under us: roll back the reserved slot and retry.
+        await this.writer.delete(MANIFEST_NS, key, orderedKey(current.seq));
+        await this.entries.refresh(key);
+        continue;
+      }
+      // Durable state committed; publish to the local cache only.
+      this.entries.remember(key, orderedKey(current.seq), entry);
+      return { entry: { ...entry }, created: true };
+    }
+    throw httpError(409, "concurrent manifest append; please retry");
   }
 
   getManifest(dealId: string): ManifestEntry[] {
@@ -367,19 +426,22 @@ export class InMemoryManifestRegistry implements ManifestRegistry {
     const now = input.now ?? Math.floor(Date.now() / 1_000);
     const previous = this.authNonces.get(key);
     if (previous !== undefined && previous > now) return false;
-    this.authNonces.set(key, input.expiresAt);
-    try {
-      await this.writer.put(NONCE_NS, NONCE_SCOPE, key, {
-        nonce: key,
-        dealId: input.dealId,
-        expiresAt: input.expiresAt,
-        at: new Date().toISOString(),
-      } satisfies UsedNonce);
-    } catch (error) {
-      if (previous === undefined) this.authNonces.delete(key);
-      else this.authNonces.set(key, previous);
-      throw error;
+    const record = {
+      nonce: key,
+      dealId: input.dealId,
+      expiresAt: input.expiresAt,
+      at: new Date().toISOString(),
+    } satisfies UsedNonce;
+    const adapter = this.writer.getAdapter();
+    if (adapter) {
+      // Create-only across instances: a concurrent or replayed nonce loses the
+      // insert atomically instead of overwriting the first consumer.
+      const created = await this.writer.putIfAbsent(NONCE_NS, NONCE_SCOPE, key, record);
+      if (!created) return false;
+    } else {
+      await this.writer.put(NONCE_NS, NONCE_SCOPE, key, record);
     }
+    this.authNonces.set(key, input.expiresAt);
     return true;
   }
 

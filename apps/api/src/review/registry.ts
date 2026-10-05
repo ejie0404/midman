@@ -83,7 +83,7 @@ export class InMemoryReviewRegistry {
     await this.cases.hydrate(dealIds);
   }
 
-  assignReviewers(dealId: string, panels: { primary: string[]; fallback: string[] }): ReviewCase {
+  async assignReviewers(dealId: string, panels: { primary: string[]; fallback: string[] }): Promise<ReviewCase> {
     if (!DEAL_RE.test(dealId)) throw httpError(400, "Invalid dealId");
     if (!Array.isArray(panels.primary) || !Array.isArray(panels.fallback)) {
       throw httpError(400, "primary and fallback must be arrays");
@@ -110,11 +110,13 @@ export class InMemoryReviewRegistry {
       createdAt: existing ? existing.createdAt : now,
       updatedAt: now,
     };
-    void this.cases.set(key, key, record);
+    // Cache updates synchronously inside `set`; awaiting surfaces durable
+    // failures to the route instead of acknowledging an uncommitted write.
+    await this.cases.set(key, key, record);
     return copyCase(record);
   }
 
-  recordRecusal(dealId: string, reviewer: string, reason: string): ReviewCase {
+  async recordRecusal(dealId: string, reviewer: string, reason: string): Promise<ReviewCase> {
     if (!DEAL_RE.test(dealId)) throw httpError(400, "Invalid dealId");
     const wallet = asAddress(reviewer, "reviewer");
     if (typeof reason !== "string" || reason.trim().length === 0) {
@@ -137,7 +139,7 @@ export class InMemoryReviewRegistry {
       recusals: [...existing.recusals, { reviewer: wallet, reason: reason.trim(), at: new Date().toISOString() }],
       updatedAt: new Date().toISOString(),
     };
-    void this.cases.set(key, key, updated);
+    await this.cases.set(key, key, updated);
     return copyCase(updated);
   }
 
@@ -233,11 +235,14 @@ export function listAssignmentAudit(dealId?: string): Promise<AssignmentAuditEnt
 }
 
 
-export function assignReviewers(dealId: string, panels: { primary: string[]; fallback: string[] }): ReviewCase {
+export function assignReviewers(
+  dealId: string,
+  panels: { primary: string[]; fallback: string[] },
+): Promise<ReviewCase> {
   return reviewRegistry.assignReviewers(dealId, panels);
 }
 
-export function recordRecusal(dealId: string, reviewer: string, reason: string): ReviewCase {
+export function recordRecusal(dealId: string, reviewer: string, reason: string): Promise<ReviewCase> {
   return reviewRegistry.recordRecusal(dealId, reviewer, reason);
 }
 

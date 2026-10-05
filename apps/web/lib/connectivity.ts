@@ -350,9 +350,11 @@ export function disconnectWallet(): void {
   setWalletState({ address: null, chainId: null });
 }
 
+const _serverSnapshot: WalletState = { address: null, chainId: null };
+
 /** React 19 hook returning the wallet store snapshot. */
 export function useWalletLifecycle(): WalletState {
-  return useSyncExternalStore(subscribe, getWalletState);
+  return useSyncExternalStore(subscribe, getWalletState, () => _serverSnapshot);
 }
 
 // ---- 4. Polling ----

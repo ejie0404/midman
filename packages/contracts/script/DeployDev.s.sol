@@ -116,6 +116,42 @@ abstract contract DeployDevBase {
         policies.registerReadinessPolicy(
             DeployPolicyIds.READINESS, READINESS_CONTENT, DeployPolicyValues.READINESS_REQUIRED
         );
+        // Approved category matrix + readiness-required variant.
+        policies.registerCategoryPolicy(
+            DeployPolicyIds.CATEGORY_INSTANT_CODE,
+            keccak256(abi.encode(CATEGORY_CONTENT, "INSTANT_CODE")),
+            DeployPolicyValues.CATEGORY_MIN_INSTANT_CODE
+        );
+        policies.registerCategoryPolicy(
+            DeployPolicyIds.CATEGORY_GAME_ITEM,
+            keccak256(abi.encode(CATEGORY_CONTENT, "GAME_ITEM")),
+            DeployPolicyValues.CATEGORY_MIN_GAME_ITEM
+        );
+        policies.registerCategoryPolicy(
+            DeployPolicyIds.CATEGORY_GAME_CURRENCY,
+            keccak256(abi.encode(CATEGORY_CONTENT, "GAME_CURRENCY")),
+            DeployPolicyValues.CATEGORY_MIN_GAME_CURRENCY
+        );
+        policies.registerCategoryPolicy(
+            DeployPolicyIds.CATEGORY_DIGITAL_GOOD,
+            keccak256(abi.encode(CATEGORY_CONTENT, "DIGITAL_GOOD")),
+            DeployPolicyValues.CATEGORY_MIN_DIGITAL_GOOD
+        );
+        policies.registerCategoryPolicy(
+            DeployPolicyIds.CATEGORY_SERVICE,
+            keccak256(abi.encode(CATEGORY_CONTENT, "SERVICE")),
+            DeployPolicyValues.CATEGORY_MIN_SERVICE
+        );
+        policies.registerCategoryPolicy(
+            DeployPolicyIds.CATEGORY_GAME_ACCOUNT,
+            keccak256(abi.encode(CATEGORY_CONTENT, "GAME_ACCOUNT")),
+            DeployPolicyValues.CATEGORY_MIN_GAME_ACCOUNT
+        );
+        policies.registerReadinessPolicy(
+            DeployPolicyIds.READINESS_REQUIRED,
+            keccak256(abi.encode(READINESS_CONTENT, "REQUIRED")),
+            DeployPolicyValues.READINESS_REQUIRED_FLAG
+        );
         policies.registerEvidencePolicy(DeployPolicyIds.EVIDENCE, EVIDENCE_CONTENT);
         policies.registerBondPolicy(
             DeployPolicyIds.BOND, BOND_CONTENT, DeployPolicyValues.BOND_CLAIMANT, DeployPolicyValues.BOND_RESPONDENT

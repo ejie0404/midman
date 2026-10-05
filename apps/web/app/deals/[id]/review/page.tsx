@@ -129,6 +129,61 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     }
   }
 
+  // Rendered in BOTH the terms-loaded and terms-unavailable views: a fresh
+  // session must be able to sign in and accept the invite before the protected
+  // terms become readable (accept does not depend on the terms).
+  const inviteBanner = inviteToken ? (
+    <div style={ok}>
+      Private invite link detected. It is kept in the URL fragment and sent only to the accept endpoint.
+    </div>
+  ) : (
+    <div style={warning}>
+      No invite token in the URL fragment. You can still review, but acceptance requires the private invite link.
+    </div>
+  );
+
+  const sessionPanel = (
+    <div style={card}>
+      <h2>Wallet session</h2>
+      {sessionWallet ? (
+        <p style={{ fontSize: 14 }}>
+          Signed in as <span style={mono}>{sessionWallet}</span>
+          {sessionExpiry ? ` · session expires ${new Date(sessionExpiry * 1_000).toISOString()}` : ""}. Wallet
+          connection alone is not authentication — this session came from a personal_sign challenge.
+        </p>
+      ) : (
+        <p style={{ fontSize: 14 }}>
+          Not signed in. Accepting the invitation will issue a sign-in challenge and sign it with your wallet.
+        </p>
+      )}
+    </div>
+  );
+
+  const acceptPanel = (
+    <div style={card}>
+      <h2>Accept (counterparty)</h2>
+      <p style={{ fontSize: 14 }}>
+        Reads the invitation token from the URL fragment, authenticates the intended wallet with a signed session,
+        and POSTs the token to the accept endpoint. The server rejects expired, revoked, consumed, or wrong-wallet
+        tokens. Must match the counterparty hint, if set.
+      </p>
+      <input
+        value={acceptAddress}
+        onChange={(e) => setAcceptAddress(e.target.value)}
+        placeholder="0x… (confirm the connected counterparty wallet)"
+        style={{ width: "100%", padding: 8, boxSizing: "border-box" }}
+      />
+      <div>
+        <button type="button" style={button} disabled={!inviteToken} onClick={() => void accept()}>
+          Accept invitation
+        </button>
+        <button type="button" style={secondaryButton} disabled={!view.terms} onClick={download}>
+          Download terms JSON
+        </button>
+      </div>
+    </div>
+  );
+
   async function previewHalf() {
     setFailure(null);
     try {
@@ -161,10 +216,20 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     );
   }
   if (!view.terms) {
+    // Terms require creator/party auth, so a fresh invitee cannot read them
+    // yet. Render the invite/session/accept controls so they can accept first.
     return (
       <main style={page}>
-        <h1>Review</h1>
-        <div style={error}>{view.error ?? "Draft not found."}</div>
+        <h1>Review &amp; sign</h1>
+        {inviteBanner}
+        {sessionPanel}
+        <div style={warning}>
+          {view.error ??
+            "Terms are not visible until you are a party. Sign in and accept the private invitation below; the terms will load afterwards."}
+        </div>
+        {acceptPanel}
+        {message ? <div style={ok}>{message}</div> : null}
+        {failure ? <div style={error}>{failure}</div> : null}
         <p style={nav}>
           <a href="/">← Home</a>
         </p>
@@ -180,28 +245,8 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
         <a href={`/deals/${routeId}`}>← Dashboard</a>
       </p>
 
-      {inviteToken ? (
-        <div style={ok}>Private invite link detected. It is kept in the URL fragment and sent only to the accept endpoint.</div>
-      ) : (
-        <div style={warning}>
-          No invite token in the URL fragment. You can still review, but acceptance requires the private invite link.
-        </div>
-      )}
-
-      <div style={card}>
-        <h2>Wallet session</h2>
-        {sessionWallet ? (
-          <p style={{ fontSize: 14 }}>
-            Signed in as <span style={mono}>{sessionWallet}</span>
-            {sessionExpiry ? ` · session expires ${new Date(sessionExpiry * 1_000).toISOString()}` : ""}. Wallet
-            connection alone is not authentication — this session came from a personal_sign challenge.
-          </p>
-        ) : (
-          <p style={{ fontSize: 14 }}>
-            Not signed in. Accepting the invitation will issue a sign-in challenge and sign it with your wallet.
-          </p>
-        )}
-      </div>
+      {inviteBanner}
+      {sessionPanel}
 
       <div style={card}>
         <h2>Agreement summary (built from signed terms + exact quote)</h2>
@@ -285,28 +330,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
         </label>
       </div>
 
-      <div style={card}>
-        <h2>Accept (counterparty)</h2>
-        <p style={{ fontSize: 14 }}>
-          Reads the invitation token from the URL fragment, authenticates the intended wallet with a signed session,
-          and POSTs the token to the accept endpoint. The server rejects expired, revoked, consumed, or wrong-wallet
-          tokens. Must match the counterparty hint, if set.
-        </p>
-        <input
-          value={acceptAddress}
-          onChange={(e) => setAcceptAddress(e.target.value)}
-          placeholder="0x… (confirm the connected counterparty wallet)"
-          style={{ width: "100%", padding: 8, boxSizing: "border-box" }}
-        />
-        <div>
-          <button type="button" style={button} disabled={!inviteToken} onClick={() => void accept()}>
-            Accept invitation
-          </button>
-          <button type="button" style={secondaryButton} onClick={download}>
-            Download terms JSON
-          </button>
-        </div>
-      </div>
+      {acceptPanel}
 
       <div style={card}>
         <h2>Signatures (off-chain EIP-712, pending until funded)</h2>

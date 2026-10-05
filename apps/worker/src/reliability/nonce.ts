@@ -34,37 +34,42 @@ export class SponsorNonceCoordinator {
     return `sponsor-nonce:${sponsor.toLowerCase()}`;
   }
 
+  private isState(value: unknown): value is SponsorNonceState {
+    return (
+      value !== null &&
+      typeof value === "object" &&
+      typeof (value as { base?: unknown }).base === "number"
+    );
+  }
+
+  /**
+   * Establish the sponsor's base ONCE. Two workers that both observe an empty
+   * reservation must not each seed their own base (that is the "7 and 6 both
+   * allocate 7" race): the first create-if-absent wins and every worker reads
+   * the same base afterwards.
+   */
   private async state(sponsor: string): Promise<SponsorNonceState> {
-    const existing = await this.store.kvGet(NS, sponsor.toLowerCase(), KEY);
-    if (
-      existing !== null &&
-      typeof existing === "object" &&
-      typeof (existing as { base?: unknown }).base === "number"
-    ) {
-      return existing as SponsorNonceState;
-    }
-    const base = await this.sync();
-    const seeded: SponsorNonceState = { base, allocated: null };
-    await this.store.kvPut(NS, sponsor.toLowerCase(), KEY, seeded);
-    return seeded;
+    const lower = sponsor.toLowerCase();
+    const existing = await this.store.kvGet(NS, lower, KEY);
+    if (this.isState(existing)) return existing;
+    const seeded: SponsorNonceState = { base: await this.sync(), allocated: null };
+    const created = await this.store.kvPutIfAbsent(NS, lower, KEY, seeded);
+    if (created) return seeded;
+    // Lost the seed race: adopt the winner's base.
+    const raced = await this.store.kvGet(NS, lower, KEY);
+    return this.isState(raced) ? raced : seeded;
   }
 
   /** Next nonce for the sponsor; persisted so it survives restarts. */
   async allocate(sponsor: string): Promise<number> {
     const lower = sponsor.toLowerCase();
     const current = await this.state(lower);
-    // The monotonic sequence is the cross-worker coordination point. Jump
-    // ahead of any previously persisted allocation so a reset/partial store
-    // can never hand out a nonce that was already used.
-    let nonce = current.base + ((await this.store.nextSeq(this.seqName(lower))) - 1);
-    while (current.allocated !== null && nonce <= current.allocated) {
-      nonce = current.base + ((await this.store.nextSeq(this.seqName(lower))) - 1);
-    }
-    // Record the high-water mark. We only advance (never regress) so a stale
-    // concurrent writer cannot hand out an already-used nonce.
-    if (current.allocated === null || nonce > current.allocated) {
-      await this.store.kvPut(NS, lower, KEY, { base: current.base, allocated: nonce });
-    }
+    // With a single shared base, the atomic sequence alone makes allocations
+    // distinct. The high-water floor guards a store that lost `allocated`.
+    const seq = await this.store.nextSeq(this.seqName(lower));
+    const floor = current.allocated === null ? current.base - 1 : current.allocated;
+    const nonce = Math.max(current.base + (seq - 1), floor + 1);
+    await this.store.kvPut(NS, lower, KEY, { base: current.base, allocated: nonce });
     return nonce;
   }
 

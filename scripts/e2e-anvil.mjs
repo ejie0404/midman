@@ -18,7 +18,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { hashAll } from "./policy-hash.mjs";
+import { hashAll, loadViem } from "./policy-hash.mjs";
 import { EXPECTED_HUB_TIERS, POLICY_ID_PREIMAGES } from "./verify-deployment.mjs";
 
 export const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
@@ -110,7 +110,7 @@ export function policyIdFor(policyType) {
   return preimage;
 }
 
-export function buildAnvilManifest(deployment, contentHashes) {
+export function buildAnvilManifest(deployment, contentHashes, bytecodeHashes = {}) {
   return {
     manifestVersion: 1,
     deploymentStatus: "ANVIL_E2E",
@@ -149,8 +149,18 @@ export function buildAnvilManifest(deployment, contentHashes) {
     },
     hubTiers: EXPECTED_HUB_TIERS.map((tier) => ({ ...tier })),
     expectedPrincipals: [],
-    bytecodeHashes: {},
+    // Pin the DEPLOYED (linked) runtime hashes so verification is complete.
+    bytecodeHashes,
   };
+}
+
+/** keccak256 of the deployed runtime code at `address` (via `cast code`). */
+function deployedCodeHash(cast, address) {
+  const result = spawnSync(cast, ["code", address, "--rpc-url", ANVIL_RPC], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`cast code failed for ${address}: ${result.stderr || result.stdout}`);
+  const code = String(result.stdout || "").trim();
+  const viem = loadViem();
+  return viem.keccak256(code.startsWith("0x") ? code : `0x${code}`);
 }
 
 async function waitForRpc(timeoutMs) {
@@ -201,7 +211,13 @@ async function main() {
     const { readFileSync } = await import("node:fs");
     const deployment = parseDeploymentFromArtifact(JSON.parse(readFileSync(artifactPath, "utf8")));
     const contentHashes = await hashAll();
-    const manifest = buildAnvilManifest(deployment, contentHashes);
+    const cast = process.env["CAST_BIN"] ?? "C:/Users/subze/AppData/Local/Temp/opencode/foundry/cast.exe";
+    const bytecodeHashes = {
+      MidmanHub: deployedCodeHash(cast, deployment.hub),
+      MidmanPolicies: deployedCodeHash(cast, deployment.policies),
+      HubDispute: deployedCodeHash(cast, deployment.disputeLibrary),
+    };
+    const manifest = buildAnvilManifest(deployment, contentHashes, bytecodeHashes);
     const manifestPath = path.join(REPO_ROOT, "deploy", "manifest.31337.json");
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 

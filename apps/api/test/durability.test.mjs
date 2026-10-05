@@ -21,6 +21,17 @@ import {
   createStoreFromEnv,
   hasKvStore,
 } from "../dist/db.js";
+import { InMemoryMessageThreadRegistry } from "../dist/categories/registry.js";
+import { GENESIS_PREVHASH, InMemoryManifestRegistry } from "../dist/evidence/registry.js";
+import {
+  createStoreAuthPersistence,
+  setAuthPersistence,
+} from "../dist/auth/persistence.js";
+import {
+  __resetSessionsForTests,
+  isSessionNonceRevokedDurable,
+  revokeSessionNonce,
+} from "../dist/auth/session.js";
 
 const SEP = "\u0000";
 
@@ -196,5 +207,158 @@ describe("AuthPersistence kv surface", () => {
     assert.deepEqual((await auth.list("auth.challenge")).map((entry) => entry.key), ["ch1"]);
     await auth.delete("auth.challenge", "ch1");
     assert.equal(await auth.get("auth.challenge", "ch1"), null);
+  });
+});
+
+// ---- A2: concurrent single-use consumption + durable revocation ----
+
+describe("A2 atomic single-use consumption across instances", () => {
+  const challenge = (nonce) => ({
+    domain: "midman.local",
+    chainId: 8453,
+    wallet: "0xbuyer",
+    nonce,
+    expiresAt: Math.floor(Date.now() / 1000) + 300,
+    purpose: "login",
+    issuedAt: Math.floor(Date.now() / 1000),
+    uri: "https://midman.local",
+    consumed: false,
+  });
+
+  it("a login challenge is consumable by exactly one of two instances", async () => {
+    const store = new MemoryStore();
+    const a = createStoreAuthPersistence(store);
+    const b = createStoreAuthPersistence(store);
+    await a.putChallenge("0x" + "11".repeat(32), challenge("0x" + "11".repeat(32)));
+    const results = await Promise.all([
+      a.delConsumeChallenge("0x" + "11".repeat(32)),
+      b.delConsumeChallenge("0x" + "11".repeat(32)),
+    ]);
+    assert.equal(results.filter((r) => r !== null).length, 1, "exactly one consume wins");
+  });
+
+  it("an invitation is redeemable by exactly one of two instances", async () => {
+    const store = new MemoryStore();
+    const a = createStoreAuthPersistence(store);
+    const b = createStoreAuthPersistence(store);
+    const nowIso = new Date().toISOString();
+    const tokenHash = "0x" + "ab".repeat(32);
+    await a.recordInvitation({
+      draftId: "draft-1",
+      dealId: "draft-1",
+      tokenHash,
+      intendedCounterparty: null,
+      createdAt: nowIso,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      revoked: false,
+      consumed: false,
+      redeemedBy: null,
+      redeemTx: null,
+    });
+    const input = { tokenHash, wallet: "0xbuyer", nowIso, redeemTx: null };
+    const results = await Promise.all([
+      a.redeemInvitation("draft-1", input),
+      b.redeemInvitation("draft-1", input),
+    ]);
+    assert.equal(results.filter((r) => r.ok).length, 1, "exactly one redeem wins");
+    const failed = results.find((r) => !r.ok);
+    assert.equal(failed.reason, "consumed");
+  });
+});
+
+describe("A3 durable metadata writes", () => {
+  it("two registry instances over one adapter allocate distinct sequences", async () => {
+    const shared = new MemoryRegistry();
+    const a = new InMemoryMessageThreadRegistry();
+    const b = new InMemoryMessageThreadRegistry();
+    a.setAdapter(shared);
+    b.setAdapter(shared);
+    const [m1, m2] = await Promise.all([
+      a.append("0xdeal", "0xbuyer", "one"),
+      b.append("0xdeal", "0xseller", "two"),
+    ]);
+    assert.notEqual(m1.seq, m2.seq, "concurrent instances must not share a sequence");
+    assert.deepEqual([m1.seq, m2.seq].sort((x, y) => x - y), [1, 2]);
+  });
+
+  it("a blocked durable write rejects instead of acknowledging", async () => {
+    const failing = {
+      async get() {
+        return null;
+      },
+      async list() {
+        return [];
+      },
+      async put() {
+        throw new Error("persistence blocked");
+      },
+      async delete() {},
+      async nextSeq() {
+        return 1;
+      },
+    };
+    const reg = new InMemoryMessageThreadRegistry();
+    reg.setAdapter(failing);
+    await assert.rejects(() => reg.append("0xdeal", "0xbuyer", "hi"), /persistence blocked/);
+  });
+});
+
+describe("A4 evidence append + nonce atomicity", () => {
+  const manifestInput = (fileHash) => ({
+    uploader: "0xbuyer",
+    kind: "delivery",
+    description: "x",
+    fileHash,
+    prevHash: GENESIS_PREVHASH,
+    scan: { status: "clean" },
+  });
+
+  it("two instances racing an append never share a sequence", async () => {
+    const adapter = new MemoryRegistry();
+    const a = new InMemoryManifestRegistry();
+    const b = new InMemoryManifestRegistry();
+    a.setAdapter(adapter);
+    b.setAdapter(adapter);
+    const results = await Promise.allSettled([
+      a.appendManifestAtomic("0xdeal", manifestInput("0x" + "aa".repeat(32))),
+      b.appendManifestAtomic("0xdeal", manifestInput("0x" + "bb".repeat(32))),
+    ]);
+    const won = results.filter((r) => r.status === "fulfilled");
+    assert.equal(won.length, 1, "exactly one append wins the slot");
+    assert.equal(won[0].value.entry.seq, 0);
+    // The loser must fail against the advanced head, not clobber seq 0.
+    const stored = await adapter.list("evidence.manifest", "0xdeal");
+    assert.equal(stored.length, 1, "the store retains exactly one entry");
+  });
+
+  it("a nonce is consumable by exactly one of two instances", async () => {
+    const adapter = new MemoryRegistry();
+    const a = new InMemoryManifestRegistry();
+    const b = new InMemoryManifestRegistry();
+    a.setAdapter(adapter);
+    b.setAdapter(adapter);
+    const nonce = "0x" + "12".repeat(32);
+    const expiresAt = Math.floor(Date.now() / 1_000) + 300;
+    const results = await Promise.all([
+      a.consumeAuthNonce({ nonce, dealId: "0xdeal", expiresAt }),
+      b.consumeAuthNonce({ nonce, dealId: "0xdeal", expiresAt }),
+    ]);
+    assert.equal(results.filter(Boolean).length, 1, "exactly one nonce consumption wins");
+  });
+});
+
+describe("A2 durable session revocation", () => {
+  it("revocation is awaited and observable by another instance", async () => {
+    const store = new MemoryStore();
+    setAuthPersistence(createStoreAuthPersistence(store));
+    try {
+      await revokeSessionNonce("nonce-xyz");
+      // Emulate a fresh API instance: drop the process-local deny-list.
+      __resetSessionsForTests();
+      assert.equal(await isSessionNonceRevokedDurable("nonce-xyz"), true, "durable revocation observed");
+    } finally {
+      setAuthPersistence(null);
+      __resetSessionsForTests();
+    }
   });
 });

@@ -5,7 +5,7 @@
 // (no network; EVIDENCE_SCAN_FORCE stands in for ClamAV).
 import { describe, it, before, beforeEach, afterEach, after } from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,6 +22,11 @@ import { getSharedRegistry, __resetRegistryForTests } from "../dist/evidence/reg
 import { __resetReceiptSignerForTests } from "../dist/evidence/receipts.js";
 import { assignReviewers, __resetReviewRegistryForTests } from "../dist/review/registry.js";
 import { MemoryStore } from "../dist/db.js";
+import {
+  EVIDENCE_AUTH_APP,
+  buildMetadataSignedMessage,
+  evidenceAuthDomain,
+} from "../dist/evidence/access.js";
 
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const KEK_A = "ab".repeat(32);
@@ -101,6 +106,41 @@ async function signedHeaders(account, method, url, { bodyBytes = Buffer.alloc(0)
   return headers;
 }
 
+/** Metadata-bound headers (required for evidence upload mutations). */
+async function metaSignedHeaders(account, method, url, fields) {
+  const { dealId, fileHash, filename, mime, size, bodyBytes = Buffer.alloc(0) } = fields;
+  const expiry = String(Math.floor(Date.now() / 1_000) + 300);
+  const nonce = randomBytes(16).toString("hex");
+  const meta = {
+    app: EVIDENCE_AUTH_APP,
+    domain: evidenceAuthDomain(),
+    method,
+    path: url,
+    dealId,
+    action: "evidence.upload",
+    fileHash,
+    filename,
+    mime,
+    size: String(size),
+    bodySha256: sha256hex(bodyBytes),
+    nonce,
+    expiry,
+  };
+  const signature = await account.signMessage({ message: buildMetadataSignedMessage(meta) });
+  return {
+    "x-wallet-address": account.address,
+    "x-wallet-expiry": expiry,
+    "x-wallet-signature": signature,
+    "x-request-nonce": nonce,
+    "x-request-action": "evidence.upload",
+    "x-request-deal": dealId,
+    "x-request-file": fileHash,
+    "x-request-filename": filename,
+    "x-request-mime": mime,
+    "x-request-size": String(size),
+  };
+}
+
 async function legacySignedHeaders(account, method, url, bodyBytes = Buffer.alloc(0)) {
   const bodyHash = sha256hex(bodyBytes);
   const expiry = String(Math.floor(Date.now() / 1_000) + 300);
@@ -164,10 +204,20 @@ async function upload(
   const boundary = "----midman-hardening-boundary";
   const body = buildMultipartBody(boundary, { kind, description }, { filename, contentType, bytes });
   const url = `/deals/${dealId}/evidence`;
-  const cs = contentSha === undefined ? sha256hex(bytes) : contentSha;
-  const auth = legacy
-    ? await legacySignedHeaders(account, "POST", url, Buffer.alloc(0))
-    : await signedHeaders(account, "POST", url, { contentSha: cs });
+  let auth;
+  if (legacy) {
+    auth = await legacySignedHeaders(account, "POST", url, Buffer.alloc(0));
+  } else if (contentSha !== undefined) {
+    auth = await signedHeaders(account, "POST", url, { contentSha });
+  } else {
+    auth = await metaSignedHeaders(account, "POST", url, {
+      dealId,
+      fileHash: sha256hex(bytes),
+      filename,
+      mime: contentType || "application/octet-stream",
+      size: bytes.length,
+    });
+  }
   return app.inject({
     method: "POST",
     url,
@@ -272,19 +322,34 @@ describe("evidence hardening", () => {
     await assert.rejects(store.rotateKek("kek-bad", Buffer.alloc(16)), /32 bytes/);
   });
 
-  it("rejects an upload whose declared x-content-sha256 does not match the bytes", async () => {
+  it("rejects an upload whose signed file hash does not match the bytes", async () => {
     const { app, store } = await makeApp();
     const dealId = `0x${"31".repeat(32)}`;
     await seedDeal(store, dealId);
     const bytes = Buffer.from("real uploaded bytes", "utf8");
-    const res = await upload(app, dealId, buyer, {
-      bytes,
-      filename: "a.txt",
-      contentType: "text/plain",
-      contentSha: sha256hex(Buffer.from("some other bytes", "utf8")),
+    const boundary = "----midman-hardening-boundary";
+    const url = `/deals/${dealId}/evidence`;
+    const res = await app.inject({
+      method: "POST",
+      url,
+      headers: {
+        ...(await metaSignedHeaders(buyer, "POST", url, {
+          dealId,
+          fileHash: sha256hex(Buffer.from("some other bytes", "utf8")),
+          filename: "a.txt",
+          mime: "text/plain",
+          size: bytes.length,
+        })),
+        "content-type": `multipart/form-data; boundary=${boundary}`,
+      },
+      payload: buildMultipartBody(boundary, { kind: "delivery", description: "x" }, {
+        filename: "a.txt",
+        contentType: "text/plain",
+        bytes,
+      }),
     });
-    assert.equal(res.statusCode, 400);
-    assert.match(res.json().error, /does not match/);
+    assert.equal(res.statusCode, 401);
+    assert.match(res.json().error, /file hash/i);
   });
 
   it("blocks signature replay with different file content", async () => {
@@ -297,7 +362,13 @@ describe("evidence hardening", () => {
     const contentB = Buffer.from("different replayed content!!!", "utf8");
 
     const headers = {
-      ...(await signedHeaders(buyer, "POST", url, { contentSha: sha256hex(contentA) })),
+      ...(await metaSignedHeaders(buyer, "POST", url, {
+        dealId,
+        fileHash: sha256hex(contentA),
+        filename: "r.txt",
+        mime: "text/plain",
+        size: contentA.length,
+      })),
       "content-type": `multipart/form-data; boundary=${boundary}`,
     };
     const first = await app.inject({
@@ -312,6 +383,7 @@ describe("evidence hardening", () => {
     });
     assert.equal(first.statusCode, 200);
 
+    // Same signature, different bytes -> the signed file hash no longer matches.
     const replay = await app.inject({
       method: "POST",
       url,
@@ -322,10 +394,10 @@ describe("evidence hardening", () => {
         bytes: contentB,
       }),
     });
-    assert.equal(replay.statusCode, 400);
+    assert.equal(replay.statusCode, 401);
   });
 
-  it("accepts a content-bound upload and serves it back", async () => {
+  it("accepts a metadata-bound upload and serves it back", async () => {
     const { app, store } = await makeApp();
     const dealId = `0x${"33".repeat(32)}`;
     await seedDeal(store, dealId);
@@ -344,7 +416,7 @@ describe("evidence hardening", () => {
     assert.deepEqual(Buffer.from(downloaded.rawPayload), bytes);
   });
 
-  it("still accepts legacy 4-line upload signatures when no content header is sent", async () => {
+  it("rejects legacy 4-line upload signatures", async () => {
     const { app, store } = await makeApp();
     const dealId = `0x${"34".repeat(32)}`;
     await seedDeal(store, dealId);
@@ -354,22 +426,23 @@ describe("evidence hardening", () => {
       contentType: "text/plain",
       legacy: true,
     });
-    assert.equal(res.statusCode, 200);
+    assert.equal(res.statusCode, 401);
+    assert.match(res.json().error, /Metadata-bound signature required/);
   });
 
-  it("requires content binding for uploads when EVIDENCE_REQUIRE_CONTENT_BINDING=1", async () => {
-    process.env["EVIDENCE_REQUIRE_CONTENT_BINDING"] = "1";
+  it("rejects content-bound upload signatures (metadata binding is mandatory)", async () => {
     const { app, store } = await makeApp();
     const dealId = `0x${"35".repeat(32)}`;
     await seedDeal(store, dealId);
+    const bytes = Buffer.from("no metadata", "utf8");
     const res = await upload(app, dealId, buyer, {
-      bytes: Buffer.from("no content header", "utf8"),
+      bytes,
       filename: "n.txt",
       contentType: "text/plain",
-      legacy: true,
+      contentSha: sha256hex(bytes),
     });
-    assert.equal(res.statusCode, 400);
-    assert.match(res.json().error, /x-content-sha256 is required/);
+    assert.equal(res.statusCode, 401);
+    assert.match(res.json().error, /Metadata-bound signature required/);
   });
 
   it("accepts 5-line non-upload signatures and legacy 4-line signatures (backward compat)", async () => {

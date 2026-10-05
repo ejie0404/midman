@@ -466,6 +466,24 @@ export class PgStore implements Store {
     );
   }
 
+  async finishRelayOwned(
+    key: string,
+    status: string,
+    txHash: string | null,
+    result: Record<string, unknown> | null,
+    owner: string,
+  ): Promise<boolean> {
+    const { rows } = await this.db.query(
+      `UPDATE relay_outbox
+       SET status = $2, tx_hash = $3, result = $4, lease_owner = NULL, lease_expires_at = NULL,
+           version = version + 1, updated_at = now()
+       WHERE idempotency_key = $1 AND lease_owner = $5
+       RETURNING 1 AS done`,
+      [key, status, txHash, jsonParam(result), owner],
+    );
+    return rows.length > 0;
+  }
+
   async listQueuedRelay(queue: string, limit: number): Promise<RelayJob[]> {
     const { rows } = await this.db.query<RelayDbRow>(
       `SELECT * FROM relay_outbox
@@ -594,6 +612,17 @@ export class PgStore implements Store {
     );
   }
 
+  async kvPutIfAbsent(ns: string, dealId: string, key: string, value: unknown): Promise<boolean> {
+    const { rows } = await this.db.query<{ inserted: number }>(
+      `INSERT INTO registry_kv (deal_id, ns, key, value, version, updated_at)
+       VALUES ($2, $1, $3, $4::jsonb, 1, now())
+       ON CONFLICT (deal_id, ns, key) DO NOTHING
+       RETURNING 1 AS inserted`,
+      [ns, dealId, key, JSON.stringify(value)],
+    );
+    return rows.length > 0;
+  }
+
   async kvPutCas(ns: string, dealId: string, key: string, value: unknown, expectedVersion: number): Promise<number> {
     const { rows } = await this.db.query<{ version: number | string }>(
       `UPDATE registry_kv
@@ -670,6 +699,28 @@ export class PgStore implements Store {
       [scope],
     );
     return rows.map((row) => ({ key: row.key, value: row.value, expiresAt: isoOrNull(row.expires_at) }));
+  }
+
+  async authConsume(scope: string, key: string): Promise<unknown | null> {
+    // Single statement: the row is locked, returned and deleted atomically, so
+    // concurrent consumers cannot both observe it.
+    const { rows } = await this.db.query<{ value: unknown }>(
+      `DELETE FROM auth_kv
+       WHERE scope = $1 AND key = $2 AND (expires_at IS NULL OR expires_at > now())
+       RETURNING value`,
+      [scope, key],
+    );
+    return rows.length > 0 ? rows[0]!.value : null;
+  }
+
+  async authGetForUpdate(scope: string, key: string): Promise<unknown | null> {
+    const { rows } = await this.db.query<{ value: unknown }>(
+      `SELECT value FROM auth_kv
+       WHERE scope = $1 AND key = $2 AND (expires_at IS NULL OR expires_at > now())
+       FOR UPDATE`,
+      [scope, key],
+    );
+    return rows.length > 0 ? rows[0]!.value : null;
   }
 
   // ---- Invitations / revocations ----

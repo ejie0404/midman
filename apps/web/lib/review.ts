@@ -625,6 +625,11 @@ export async function proposeSettlement(
     readonly sellerCostUnits: string;
     readonly expectedPhase: number;
     readonly settlementNonce: string;
+    /** Proposer's EIP-712 signature over THIS envelope (required by the API). */
+    readonly proposerSignature: string;
+    readonly expiresAt?: string | number;
+    readonly chainId?: number;
+    readonly hub?: string;
     readonly principalUnits?: string;
     readonly claimantBondUnits?: string;
     readonly respondentBondUnits?: string;
@@ -642,7 +647,11 @@ export async function proposeSettlement(
     sellerCostUnits: input.sellerCostUnits,
     expectedPhase: input.expectedPhase,
     settlementNonce: input.settlementNonce,
+    proposerSignature: input.proposerSignature,
   };
+  if (input.expiresAt !== undefined) body["expiresAt"] = String(input.expiresAt);
+  if (input.chainId !== undefined) body["chainId"] = input.chainId;
+  if (input.hub !== undefined) body["hub"] = input.hub;
   if (input.principalUnits !== undefined) body["principalUnits"] = input.principalUnits;
   if (input.claimantBondUnits !== undefined) body["claimantBondUnits"] = input.claimantBondUnits;
   if (input.respondentBondUnits !== undefined) body["respondentBondUnits"] = input.respondentBondUnits;

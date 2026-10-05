@@ -371,6 +371,17 @@ export class RelayProcessor {
       if (this.reader) {
         const resolved = await this.reconcileOne(existing);
         if (resolved !== null) return resolved;
+        // Receipt not visible yet. If the signed tx was persisted, automatically
+        // rebroadcast the SAME bytes (same hash) to recover a dropped broadcast.
+        const attempt = (existing.result?.["attempt"] ?? null) as { raw?: unknown } | null;
+        if (this.sponsor?.key && typeof attempt?.raw === "string") {
+          try {
+            const rebroadcast = await this.rebroadcast(existing.idempotencyKey);
+            if (rebroadcast.status === "submitted") return rebroadcast;
+          } catch {
+            // Fall through to receipt-pending; a rebroadcast failure is benign.
+          }
+        }
         return { status: "submitted", txHash: existing.txHash, reason: "receipt-pending" };
       }
       return { status: "already-handled", txHash: existing.txHash };
@@ -392,35 +403,38 @@ export class RelayProcessor {
       }
     }
 
-    const dealId = existing.params["dealId"] as Hash | undefined;
-    if (!this.hub || !dealId) {
-      await this.retire(existing, "failed", "no-hub-or-deal");
-      return { status: "failed", txHash: null, reason: "no-hub-or-deal" };
-    }
-
-    const pre = await this.check(this.reader, this.hub, existing.action, dealId, existing.params);
-    if (!pre.ok) {
-      await this.store.finishRelay(idempotencyKey, "skipped", null, { reason: pre.reason });
-      return { status: "skipped", txHash: null, reason: pre.reason };
-    }
-
-    const data = this.build(existing.action, dealId, existing.params);
-    if (!data) {
-      await this.retire(existing, "failed", "no-calldata");
-      return { status: "failed", txHash: null, reason: "no-calldata" };
-    }
-    const validation = validateRelayJob(existing, data, { hub: this.hub });
-    if (!validation.ok) {
-      const reason = `calldata-mismatch:${validation.reason}:${validation.functionName ?? "?"}`;
-      await this.retire(existing, "failed", reason);
-      return { status: "failed", txHash: null, reason, functionName: validation.functionName };
-    }
-
+    // Acquire the lease BEFORE evaluating preconditions or mutating state: only
+    // the lease owner may mark a job terminal, so a second processor can never
+    // mark 'skipped'/'failed' while another worker holds a valid lease.
     const job = await this.claim(existing);
     if (!job) return { status: "already-handled", txHash: existing.txHash, reason: "lease-held" };
     if (job.attempts > this.maxAttempts) {
       await this.retire(job, "failed", "max-attempts-exceeded");
       return { status: "failed", txHash: null, reason: "max-attempts-exceeded" };
+    }
+
+    const dealId = job.params["dealId"] as Hash | undefined;
+    if (!this.hub || !dealId) {
+      await this.retire(job, "failed", "no-hub-or-deal");
+      return { status: "failed", txHash: null, reason: "no-hub-or-deal" };
+    }
+
+    const pre = await this.check(this.reader, this.hub, job.action, dealId, job.params);
+    if (!pre.ok) {
+      await this.retire(job, "skipped", pre.reason);
+      return { status: "skipped", txHash: null, reason: pre.reason };
+    }
+
+    const data = this.build(job.action, dealId, job.params);
+    if (!data) {
+      await this.retire(job, "failed", "no-calldata");
+      return { status: "failed", txHash: null, reason: "no-calldata" };
+    }
+    const validation = validateRelayJob(job, data, { hub: this.hub });
+    if (!validation.ok) {
+      const reason = `calldata-mismatch:${validation.reason}:${validation.functionName ?? "?"}`;
+      await this.retire(job, "failed", reason);
+      return { status: "failed", txHash: null, reason, functionName: validation.functionName };
     }
 
     // Ownership check: if our lease was lost to another worker (or reaped),
@@ -430,7 +444,8 @@ export class RelayProcessor {
 
     // No sponsor => hand back unsigned calldata (operator can submit manually).
     if (!this.sponsor || !this.sponsor.key || !this.sponsor.rpcUrl) {
-      await this.store.finishRelay(idempotencyKey, "unsigned", null, { to: this.hub, data });
+      const applied = await this.store.finishRelayOwned(idempotencyKey, "unsigned", null, { to: this.hub, data }, this.leaseOwner);
+      if (!applied) return { status: "already-handled", txHash: existing.txHash, reason: "lease-lost" };
       auditLog({
         actor: "relay",
         action: `relay.${job.action}.unsigned`,
@@ -443,11 +458,14 @@ export class RelayProcessor {
     const estimate = await this.estimate(job, data);
 
     if (this.budget && !this.budget.canSpend(1, estimate.costWei)) {
-      await this.store.finishRelay(idempotencyKey, "unsigned", null, {
-        to: this.hub,
-        data,
-        reason: "budget-exhausted",
-      });
+      const applied = await this.store.finishRelayOwned(
+        idempotencyKey,
+        "unsigned",
+        null,
+        { to: this.hub, data, reason: "budget-exhausted" },
+        this.leaseOwner,
+      );
+      if (!applied) return { status: "already-handled", txHash: existing.txHash, reason: "lease-lost" };
       return { status: "unsigned", txHash: null, reason: "budget-exhausted" };
     }
 
@@ -455,7 +473,14 @@ export class RelayProcessor {
     const sinceIso = new Date((this.now() - 86_400) * 1_000).toISOString();
     const spent = await this.store.countSponsorsSince(sinceIso);
     if (spent >= this.sponsor.dailyCapTxs) {
-      await this.store.finishRelay(idempotencyKey, "unsigned", null, { to: this.hub, data, reason: "daily-cap" });
+      const applied = await this.store.finishRelayOwned(
+        idempotencyKey,
+        "unsigned",
+        null,
+        { to: this.hub, data, reason: "daily-cap" },
+        this.leaseOwner,
+      );
+      if (!applied) return { status: "already-handled", txHash: existing.txHash, reason: "lease-lost" };
       return { status: "unsigned", txHash: null, reason: "daily-cap" };
     }
 
@@ -471,7 +496,14 @@ export class RelayProcessor {
       sinceIso,
     );
     if (!reservation.granted) {
-      await this.store.finishRelay(idempotencyKey, "unsigned", null, { to: this.hub, data, reason: "budget-exhausted" });
+      const applied = await this.store.finishRelayOwned(
+        idempotencyKey,
+        "unsigned",
+        null,
+        { to: this.hub, data, reason: "budget-exhausted" },
+        this.leaseOwner,
+      );
+      if (!applied) return { status: "already-handled", txHash: existing.txHash, reason: "lease-lost" };
       return { status: "unsigned", txHash: null, reason: "budget-exhausted" };
     }
 
@@ -500,20 +532,24 @@ export class RelayProcessor {
             costWei: estimate.costWei.toString(),
           };
           // Persist identity + raw signed tx BEFORE broadcast.
-          await this.store.finishRelay(idempotencyKey, "submitted", signed.hash, {
-            to: this.hub,
-            data,
-            attempt,
-          });
+          await this.store.finishRelayOwned(
+            idempotencyKey,
+            "submitted",
+            signed.hash,
+            { to: this.hub, data, attempt },
+            this.leaseOwner,
+          );
           if (typeof transport.sendRaw === "function") {
             try {
               const broadcast = await transport.sendRaw(signed.raw);
               if (broadcast !== signed.hash) {
-                await this.store.finishRelay(idempotencyKey, "submitted", broadcast, {
-                  to: this.hub,
-                  data,
-                  attempt: { ...attempt, txHash: broadcast, rebroadcastHash: signed.hash },
-                });
+                await this.store.finishRelayOwned(
+                  idempotencyKey,
+                  "submitted",
+                  broadcast,
+                  { to: this.hub, data, attempt: { ...attempt, txHash: broadcast, rebroadcastHash: signed.hash } },
+                  this.leaseOwner,
+                );
                 return { status: "submitted" as const, txHash: broadcast, unresolved: false };
               }
             } catch (error) {
@@ -544,12 +580,18 @@ export class RelayProcessor {
         // Two-phase path already persisted the job as submitted.
         this.submittedKeys.add(idempotencyKey);
       } else {
-        await this.store.finishRelay(idempotencyKey, "submitted", outcome.txHash, {
-          to: this.hub,
-          data,
-          sponsor: this.sponsorAddress,
-          attempt: { id: attemptId, nonce: (outcome as { nonce?: number }).nonce ?? null },
-        });
+        await this.store.finishRelayOwned(
+          idempotencyKey,
+          "submitted",
+          outcome.txHash,
+          {
+            to: this.hub,
+            data,
+            sponsor: this.sponsorAddress,
+            attempt: { id: attemptId, nonce: (outcome as { nonce?: number }).nonce ?? null },
+          },
+          this.leaseOwner,
+        );
         this.submittedKeys.add(idempotencyKey);
       }
       if (this.budget) this.budget.record(outcome.txHash, estimate.costWei, this.now());
@@ -622,10 +664,22 @@ export class RelayProcessor {
       receipt = null;
     }
     if (receipt === null) return null;
-    const status = receipt.status ? await receiptFinality(this.reader, receipt) : "reverted";
+    if (!receipt.status) {
+      // A revert is only terminal once it cannot be reorged away.
+      if ((await receiptFinality(this.reader, receipt)) === "confirmed") return null;
+      const result = {
+        ...(job.result ?? {}),
+        reason: "receipt-reverted",
+        blockNumber: receipt.blockNumber.toString(),
+      };
+      await this.store.finishRelay(job.idempotencyKey, "reverted", job.txHash, result);
+      return { status: "reverted", txHash: job.txHash };
+    }
+    const finality = await receiptFinality(this.reader, receipt);
+    const status = finality === "finalized" ? "finalized" : "confirmed";
     const result = {
       ...(job.result ?? {}),
-      reason: receipt.status ? `receipt-${status}` : "receipt-reverted",
+      reason: `receipt-${status}`,
       blockNumber: receipt.blockNumber.toString(),
     };
     await this.store.finishRelay(job.idempotencyKey, status, job.txHash, result);
@@ -638,7 +692,15 @@ export class RelayProcessor {
   }
 
   private async retire(job: RelayJob, status: string, reason: string): Promise<void> {
-    await this.store.finishRelay(job.idempotencyKey, status, null, { reason });
+    // Ownership-guarded: a stale worker must not finalize a job it no longer owns.
+    const applied = await this.store.finishRelayOwned(
+      job.idempotencyKey,
+      status,
+      null,
+      { reason },
+      this.leaseOwner,
+    );
+    if (!applied) return;
     const dealId = dealIdOf(job);
     auditLog({
       actor: "relay",
@@ -655,7 +717,8 @@ export class RelayProcessor {
     }
     const backoff = retryBackoffSeconds(job.attempts);
     const result = { ...(job.result ?? {}), reason, retryAt: this.now() + backoff, attempts: job.attempts };
-    await this.store.finishRelay(job.idempotencyKey, "queued", null, result);
+    const applied = await this.store.finishRelayOwned(job.idempotencyKey, "queued", null, result, this.leaseOwner);
+    if (!applied) return { status: "already-handled", txHash: null, reason: "lease-lost" };
     const dealId = dealIdOf(job);
     auditLog({
       actor: "relay",
@@ -842,14 +905,18 @@ function createProductionTransport(sponsor: HardeningSponsor, rpcPool: RpcPool |
 async function receiptFinality(
   reader: ChainReader,
   receipt: TransactionReceipt,
-): Promise<"confirmed" | "finalized"> {
+): Promise<"confirmed" | "finalized" | "unknown"> {
+  // A reader with no finality provider cannot distinguish "not yet final" from
+  // "final"; report 'unknown' so callers stop waiting on a signal that will
+  // never arrive (but still never claim a success above a known final head).
+  if (typeof reader.getBlockByTag !== "function") return "unknown";
   try {
     const finalized = await reader.getBlockByTag("finalized");
     if (finalized !== null && receipt.blockNumber <= finalized.number) return "finalized";
+    return "confirmed";
   } catch {
-    // fall through to tentative confirmation
+    return "unknown";
   }
-  return "confirmed";
 }
 
 // ---- Receipt reconciliation ----
@@ -863,7 +930,9 @@ export interface ReconcileOutcome {
   readonly reason: string;
 }
 
-const RECONCILE_STATUSES = ["submitted", "confirmed", "unresolved"] as const;
+// 'orphaned' is re-listed so a reorg-reverted-then-reincluded tx is recovered;
+// only 'finalized'/'failed'/'unsigned' are genuinely terminal.
+const RECONCILE_STATUSES = ["submitted", "confirmed", "unresolved", "orphaned"] as const;
 const RECONCILE_LIMIT = 500;
 
 /**
@@ -903,14 +972,21 @@ export async function reconcileSubmitted(
     seen.add(job.idempotencyKey);
     const txHash = job.txHash;
     let receipt: TransactionReceipt | null = null;
+    let readFailed = false;
     try {
       receipt = await reader.getTransactionReceipt(txHash as Hash);
     } catch {
+      // An RPC exception is UNKNOWN, not proof the receipt disappeared.
+      readFailed = true;
       receipt = null;
     }
     if (receipt === null) {
-      if (job.status === "confirmed") {
-        // Previously mined, now absent: the block was reorged away.
+      if (readFailed) {
+        outcomes.push({ key: job.idempotencyKey, txHash, status: "pending", reason: "rpc-unavailable" });
+        continue;
+      }
+      if (job.status === "confirmed" || job.status === "orphaned") {
+        // Verified absence: previously mined, now gone -> reorg corrected.
         const result = { ...(job.result ?? {}), reason: "receipt-disappeared" };
         await store.finishRelay(job.idempotencyKey, "orphaned", txHash, result);
         const dealId = dealIdOf(job);
@@ -926,8 +1002,29 @@ export async function reconcileSubmitted(
       }
       continue;
     }
-    const finalStatus: ReconcileStatus = receipt.status ? await receiptFinality(reader, receipt) : "reverted";
-    const reason = receipt.status ? `receipt-${finalStatus}` : "receipt-reverted";
+    if (!receipt.status) {
+      // A reverted receipt is NOT terminal until its block is finalized: until
+      // then it may still be reorged away, so keep it recoverable.
+      const finality = await receiptFinality(reader, receipt);
+      // 'confirmed' = above a known final head (may reorg): keep recoverable.
+      // 'finalized'/'unknown' = no further deferral is possible.
+      if (finality === "confirmed") {
+        outcomes.push({ key: job.idempotencyKey, txHash, status: "pending", reason: "reverted-pending-finality" });
+        continue;
+      }
+      const result = {
+        ...(job.result ?? {}),
+        reason: "receipt-reverted",
+        blockNumber: receipt.blockNumber.toString(),
+        blockLinkedAt: new Date().toISOString(),
+      };
+      await store.finishRelay(job.idempotencyKey, "reverted", txHash, result);
+      outcomes.push({ key: job.idempotencyKey, txHash, status: "reverted", reason: "receipt-reverted" });
+      continue;
+    }
+    const finality = await receiptFinality(reader, receipt);
+    const finalStatus: ReconcileStatus = finality === "finalized" ? "finalized" : "confirmed";
+    const reason = `receipt-${finalStatus}`;
     const result = {
       ...(job.result ?? {}),
       reason,

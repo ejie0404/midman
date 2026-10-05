@@ -8,7 +8,14 @@ import {MockUSDC, MockFeed} from "./Mocks.t.sol";
 import {DealTerms, OutageUnknown, TooEarly, TooLate, BadPhase} from "../src/DealTypes.sol";
 
 /// @notice Round-2 audit regressions for the outage deadline fixpoint, the
-/// append-only/pruned retention ledger and the availability semantics.
+/// append-only/pruned retention ledger, the **sequential coverage watermark**
+/// and the availability semantics.
+///
+/// Coverage model: reportOutage consumes only the next un-audited feed round
+/// (`roundId == lastAuditedRound + 1`) together with its recovery, so rounds are
+/// reported in the consecutive order the feed mints them (2, 4, 6, ... given the
+/// MockFeed's head starts at round 1). An unreported transition leaves the
+/// watermark behind the head and deadline math reports history UNKNOWN.
 contract OutageDeadlineTest is MidmanHubTest {
     // ---- helpers ----
 
@@ -55,6 +62,7 @@ contract OutageDeadlineTest is MidmanHubTest {
         policies.registerFeePolicy(feePolicy, keccak256("fee-content"));
         policies.registerCategoryPolicy(categoryPolicy, keccak256("cat-content"), 3_600);
         policies.registerReadinessPolicy(noReadiness, keccak256("ready-content"), false);
+        policies.registerReadinessPolicy(readinessPolicy, keccak256("ready-req-content"), true);
         policies.registerEvidencePolicy(evidencePolicy, keccak256("evi-content"));
         policies.registerBondPolicy(bondPolicy, keccak256("bond-content"), 5_000_000, 5_000_000);
         policies.registerArbitrationPolicy(arbPolicy, keccak256("arb-content"), 0x07);
@@ -71,10 +79,9 @@ contract OutageDeadlineTest is MidmanHubTest {
     /// downtime + grace, and the timeout stays blocked long after recovery.
     function testRegression1_CrossingDeadlinePreservesDowntime() public {
         (bytes32 dealId, , uint64 d0) = _deliveredDeal();
-        feed.programOutage(10, d0 - 1_000, d0 + 7_000);
+        feed.programOutage(2, d0 - 1_000, d0 + 7_000);
         vm.warp(d0 + 7_000 + 1);
-        policies.reportOutage(10);
-        feed.programUpRound(12, d0 + 7_000 + 1);
+        policies.reportOutage(2);
 
         uint64 eff = d0 + 9_800; // downtime 8,000 + grace 1,800
         (, uint64 inspection, , , , , , bool av) = _dealEnds(dealId);
@@ -96,13 +103,12 @@ contract OutageDeadlineTest is MidmanHubTest {
     function testRegression2_SecondOutageInsideExtensionCounts() public {
         (bytes32 dealId, , uint64 d0) = _deliveredDeal();
         // O1 crosses the deadline; O2 sits inside O1's extension.
-        feed.programOutage(20, d0 - 500, d0 + 3_000);
+        feed.programOutage(2, d0 - 500, d0 + 3_000);
         vm.warp(d0 + 3_001);
-        policies.reportOutage(20);
-        feed.programOutage(22, d0 + 4_000, d0 + 5_000);
+        policies.reportOutage(2);
+        feed.programOutage(4, d0 + 4_000, d0 + 5_000);
         vm.warp(d0 + 5_001);
-        policies.reportOutage(22);
-        feed.programUpRound(24, d0 + 5_001);
+        policies.reportOutage(4);
 
         (, uint64 inspection, , , , , , bool av) = _dealEnds(dealId);
         assertTrue(av);
@@ -112,16 +118,15 @@ contract OutageDeadlineTest is MidmanHubTest {
     /// @notice Three chained outages all count.
     function testRegression2b_CascadingOutages() public {
         (bytes32 dealId, , uint64 d0) = _deliveredDeal();
-        feed.programOutage(30, d0 - 500, d0 + 1_000);
+        feed.programOutage(2, d0 - 500, d0 + 1_000);
         vm.warp(d0 + 1_001);
-        policies.reportOutage(30);
-        feed.programOutage(32, d0 + 2_000, d0 + 3_000);
+        policies.reportOutage(2);
+        feed.programOutage(4, d0 + 2_000, d0 + 3_000);
         vm.warp(d0 + 3_001);
-        policies.reportOutage(32);
-        feed.programOutage(34, d0 + 4_000, d0 + 5_000);
+        policies.reportOutage(4);
+        feed.programOutage(6, d0 + 4_000, d0 + 5_000);
         vm.warp(d0 + 5_001);
-        policies.reportOutage(34);
-        feed.programUpRound(36, d0 + 5_001);
+        policies.reportOutage(6);
 
         // Fixpoint: D0=d0. O1 [d0-500,d0+1000], O2 [d0+2000,d0+3000], O3 [d0+4000,d0+5000].
         // Iteration grows E to include each in turn; total downtime 1500+1000+1000=3500,
@@ -135,36 +140,92 @@ contract OutageDeadlineTest is MidmanHubTest {
 
     function testDelayedReportStillCounts() public {
         (bytes32 dealId, , uint64 d0) = _deliveredDeal();
-        feed.programOutage(40, d0 - 1_000, d0 - 500);
-        // Report 10 days later (well inside MAX_HISTORY_AGE).
+        feed.programOutage(2, d0 - 1_000, d0 - 500);
+        // Report 10 days later (well inside MAX_HISTORY_AGE, still the next round).
         vm.warp(d0 + 10 days);
-        policies.reportOutage(40);
-        feed.programUpRound(42, d0 + 10 days);
+        policies.reportOutage(2);
         (, uint64 inspection, , , , , , bool av) = _dealEnds(dealId);
         assertTrue(av);
         assertEq(inspection, d0 + 2_300, "downtime 500 + grace 1800");
     }
 
-    // ---- duplicate rejection, incl. after prune ----
+    // ---- coverage watermark: out-of-order / duplicate reports rejected ----
 
-    function testDuplicateRejectedForever() public {
+    function testCoverageWatermarkRejectsOutOfOrderAndDuplicate() public {
         (, uint64 anchor, ) = _deliveredDeal();
-        feed.programOutage(50, anchor + 10, anchor + 20);
+        feed.programOutage(2, anchor + 10, anchor + 20);
         vm.warp(anchor + 21);
-        policies.reportOutage(50);
-        vm.expectRevert(MidmanPolicies.AlreadyRegistered.selector);
-        policies.reportOutage(50);
+        policies.reportOutage(2);
+        bytes32 key = keccak256(abi.encode(uint64(anchor + 10), uint64(anchor + 20)));
+        assertTrue(policies.outageSeen(key), "dedupe recorded");
+        assertEq(policies.lastAuditedRound(), 3, "watermark advanced to recovery");
+        // Re-reporting an already-audited round is rejected by the watermark.
+        vm.expectRevert(MidmanPolicies.BadPanel.selector);
+        policies.reportOutage(2);
+        // Skipping ahead to a later round is likewise rejected.
+        feed.programOutage(6, anchor + 30, anchor + 40);
+        vm.warp(anchor + 41);
+        vm.expectRevert(MidmanPolicies.BadPanel.selector);
+        policies.reportOutage(6);
 
-        // Age past MAX_HISTORY_AGE and prune via a fresh report.
+        // Age past MAX_HISTORY_AGE and prune via the next legitimate report.
         vm.warp(anchor + policies.MAX_HISTORY_AGE() + 1 days);
         uint64 nowTs = uint64(block.timestamp);
-        feed.programOutage(52, nowTs - 10, nowTs);
+        feed.programOutage(4, nowTs - 10, nowTs);
         vm.warp(nowTs + 1);
-        policies.reportOutage(52);
+        policies.reportOutage(4);
         assertEq(policies.outageCount(), 1, "interval pruned by age");
-        // The pruned interval's key is still permanently rejected.
-        vm.expectRevert(MidmanPolicies.AlreadyRegistered.selector);
-        policies.reportOutage(50);
+        assertTrue(policies.outageSeen(key), "dedupe persists after prune");
+    }
+
+    // ---- unreported history -> unavailable ----
+
+    /// @notice The audit finding: two outages that recovered but were never
+    /// reported leave the watermark behind the head. History is UNKNOWN, so the
+    /// timeout is blocked (never settled early) and admission stays fail-open
+    /// only against the ORIGINAL deadline until someone reports.
+    function testUnreportedOutagesBlockTimeoutUntilReported() public {
+        DealTerms memory t = _terms(P, 0);
+        _fund(t, false);
+        _deliver(t.dealId);
+        uint64 anchor = hub.getDeal(t.dealId).deliveredAt;
+        uint64 d0 = anchor + 3_600;
+
+        // Two recoveries, neither reported. Head has advanced to round 5 but
+        // the watermark is still 1.
+        feed.programOutage(2, d0 - 500, d0 + 1_000);
+        feed.programOutage(4, d0 + 2_000, d0 + 3_000);
+
+        (,,,,, , , bool av) = _dealEnds(t.dealId);
+        assertFalse(av, "incomplete history is unavailable");
+        assertEq(policies.lastAuditedRound(), 1, "watermark not advanced");
+
+        vm.warp(d0 + 3_600);
+        vm.expectRevert(OutageUnknown.selector);
+        hub.finalizeAfterTimeout(t.dealId);
+
+        // Fail-open admission uses the ORIGINAL deadline; that has passed here,
+        // so a buyer must first make history complete (permissionless report).
+        vm.prank(buyer);
+        vm.expectRevert(TooLate.selector);
+        hub.openDispute(t.dealId, 1, bytes32(0), bytes32(0), 0, new bytes(0));
+
+        // Partially reported history stays unavailable until fully audited.
+        policies.reportOutage(2);
+        assertEq(policies.lastAuditedRound(), 3, "only first transition audited");
+        (,,,,, , , bool avPartial) = _dealEnds(t.dealId);
+        assertFalse(avPartial, "partial history is unavailable");
+        vm.expectRevert(OutageUnknown.selector);
+        hub.finalizeAfterTimeout(t.dealId);
+
+        policies.reportOutage(4);
+        assertEq(policies.lastAuditedRound(), 5, "history fully audited");
+        (, uint64 inspection, , , , , , bool av2) = _dealEnds(t.dealId);
+        assertTrue(av2, "history restored");
+        assertEq(inspection, d0 + 6_100, "downtime 2500 + grace 3600");
+        vm.prank(buyer);
+        hub.openDispute(t.dealId, 1, bytes32(0), bytes32(0), 0, new bytes(0));
+        assertEq(hub.getDeal(t.dealId).phase, 2, "dispute opened in extended window");
     }
 
     // ---- history overflow -> unavailable ----
@@ -178,7 +239,7 @@ contract OutageDeadlineTest is MidmanHubTest {
 
         uint256 n = policies.MAX_RETAINED() + 1;
         for (uint256 i = 0; i < n; i++) {
-            uint80 r = uint80(1_000 + 2 * i);
+            uint80 r = uint80(2 + 2 * i);
             uint64 s = t0 + uint64(i * 10);
             feed.programOutage(r, s, s + 1);
             vm.warp(s + 2);
@@ -221,10 +282,9 @@ contract OutageDeadlineTest is MidmanHubTest {
         uint64 cutoff = hub.escapeAt(t.dealId);
         assertEq(cutoff, openedAt + 5_184_000, "fixed cutoff");
 
-        feed.programOutage(60, openedAt + 1_000, openedAt + 4_000_000);
+        feed.programOutage(2, openedAt + 1_000, openedAt + 4_000_000);
         vm.warp(openedAt + 4_000_001);
-        policies.reportOutage(60);
-        feed.programUpRound(62, openedAt + 4_000_001);
+        policies.reportOutage(2);
         assertEq(hub.escapeAt(t.dealId), cutoff, "escape unaffected by outage");
 
         vm.warp(cutoff - 1);
@@ -310,13 +370,12 @@ contract OutageDeadlineTest is MidmanHubTest {
             _deliver(t.dealId);
             uint64 d0 = hub.getDeal(t.dealId).deliveredAt + 3_600;
             for (uint256 i = 0; i < n; i++) {
-                uint80 r = uint80(1_000 + 2 * i);
+                uint80 r = uint80(2 + 2 * i);
                 uint64 s = d0 - 3_000 + uint64(i * 150);
                 feed.programOutage(r, s, s + 100);
             }
             vm.warp(d0 + 1);
-            for (uint256 i = 0; i < n; i++) policies.reportOutage(uint80(1_000 + 2 * i));
-            feed.programUpRound(uint80(5_000), d0 + 1);
+            for (uint256 i = 0; i < n; i++) policies.reportOutage(uint80(2 + 2 * i));
             uint256 g = gasleft();
             (,,,,, , , bool av) = _dealEnds(t.dealId);
             uint256 used = g - gasleft();

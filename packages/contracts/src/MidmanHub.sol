@@ -216,6 +216,11 @@ contract MidmanHub is EIP712, ReentrancyGuard {
         );
         (bool readExists,, bool readRequired) = policies.readinessPolicies(t.readinessPolicyId);
         require(readExists, BadTerms());
+        // P-11 on-chain tier rule: readiness is required for the <=3h pricing
+        // tier and forbidden otherwise, so a weaker no-readiness policy can
+        // never be selected for a short deal (nor a readiness gate imposed on a
+        // long one by a substituted policy).
+        require(readRequired == (duration <= MidmanDK.READINESS_TIER_MAX_SECONDS), BadTerms());
         if (readRequired) {
             require(t.readinessConsentHash != bytes32(0), BadTerms());
             require(!state.usedActionNonce[readiness.nonce], BadNonce());
@@ -273,6 +278,10 @@ contract MidmanHub is EIP712, ReentrancyGuard {
         );
         state.usedAdmissionNonce[admission.admissionNonce] = true;
         _verify(policies.admissionSigner(), adigest, admission.signature);
+        // Bind admission to the exact category policy named in the signed terms,
+        // so a client cannot swap in a weaker category minimum after the risk
+        // role approved a specific policy for this deal.
+        require(admission.minPolicyId == t.categoryPolicyId, BadTerms());
 
         uint256 prepaid = Finance.buyerFeeShare(t.quotedPlatformFee, t.buyerFeeBps);
         uint256 fundedAmount = t.principal + prepaid;

@@ -3,10 +3,10 @@ import type { Confirmation } from "../../lib/api";
 type Level = Confirmation["level"];
 
 const COLORS: Record<Level, string> = {
-  pending: "#92600a",
-  included: "#0a5dc9",
-  safe: "#1a7f37",
-  finalized: "#1a7f37",
+  pending: "#e3b341",
+  included: "#6cb6ff",
+  safe: "#7ee787",
+  finalized: "#7ee787",
 };
 
 /**

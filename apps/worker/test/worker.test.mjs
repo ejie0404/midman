@@ -211,6 +211,30 @@ describe("progression", () => {
     assert.equal(dueAction({ funded: true, phase: 9 }, 99999999), null);
   });
 
+  it("dueAction uses authoritative deadlines and refuses when they are unknown", () => {
+    const deadlines = {
+      delivery: 0n,
+      inspection: 0n,
+      negotiation: 0n,
+      escalation: 200n,
+      evidence: 0n,
+      primary: 0n,
+      fallbackEnd: 0n,
+      available: true,
+    };
+    // Escalation end comes from the contract view (200), not original+margin.
+    assert.equal(
+      dueAction({ funded: true, phase: 3, disputeOpenedAt: 1n }, 200, deadlines),
+      "lapseDispute",
+    );
+    assert.equal(dueAction({ funded: true, phase: 3, disputeOpenedAt: 1n }, 199, deadlines), null);
+    // available=false => clocks UNKNOWN => no time-derived action.
+    assert.equal(
+      dueAction({ funded: true, phase: 3, disputeOpenedAt: 1n }, 999_999_999, { ...deadlines, available: false }),
+      null,
+    );
+  });
+
   it("escapePass surfaces fixed-cutoff exits", async () => {
     const store = new MemoryStore();
     await seedDraftDeal(store);

@@ -55,6 +55,23 @@ export interface ChainReader {
     wallet: Address,
   ): Promise<boolean>;
   getBondPolicy(policies: Address, id: Hash): Promise<{ claimantBond: bigint; respondentBond: bigint }>;
+  /**
+   * Authoritative outage-adjusted deadlines straight from the hub
+   * (`effectiveDeadlines`). Optional: callers fall back to original-deadline
+   * derivation when a reader does not implement it. `available=false` means the
+   * contract could not prove history completeness — treat every clock as
+   * UNKNOWN and do not enqueue time-derived actions.
+   */
+  effectiveDeadlines?(hub: Address, dealId: Hash): Promise<{
+    readonly delivery: bigint;
+    readonly inspection: bigint;
+    readonly negotiation: bigint;
+    readonly escalation: bigint;
+    readonly evidence: bigint;
+    readonly primary: bigint;
+    readonly fallbackEnd: bigint;
+    readonly available: boolean;
+  }>;
 }
 
 export function createViemReader(rpcUrls: string[]): ChainReader {
@@ -140,6 +157,16 @@ export function createViemReader(rpcUrls: string[]): ChainReader {
         args: [dealId],
       })) as Record<string, bigint | string | boolean | number>;
       return deal;
+    },
+    async effectiveDeadlines(hub: Address, dealId: Hash) {
+      const [delivery, inspection, negotiation, escalation, evidence, primary, fallbackEnd, available] =
+        (await client.readContract({
+          address: hub,
+          abi: HUB_ABI,
+          functionName: "effectiveDeadlines",
+          args: [dealId],
+        })) as readonly [bigint, bigint, bigint, bigint, bigint, bigint, bigint, boolean];
+      return { delivery, inspection, negotiation, escalation, evidence, primary, fallbackEnd, available };
     },
     async getClaim(hub: Address, claimId: Hash): Promise<{ recipient: Address; amount: bigint }> {
       const [recipient, amount] = (await client.readContract({

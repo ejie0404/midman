@@ -296,7 +296,7 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ReviewRouteDeps
         const { dealId } = req.params;
         await authReviewer(req, getCase(dealId) ? dealId : undefined);
         const body = (req.body ?? {}) as { primary?: string[]; fallback?: string[] };
-        const record = assignReviewers(dealId, {
+        const record = await assignReviewers(dealId, {
           primary: body.primary ?? [],
           fallback: body.fallback ?? [],
         });
@@ -318,7 +318,7 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ReviewRouteDeps
         if (typeof body.reviewer !== "string" || body.reviewer.toLowerCase() !== wallet.toLowerCase()) {
           throw httpError(403, "Recusal must be signed by the recusing reviewer");
         }
-        const record = recordRecusal(dealId, body.reviewer, String(body.reason ?? ""));
+        const record = await recordRecusal(dealId, body.reviewer, String(body.reason ?? ""));
         return {
           ...record,
           remainingEligible: {
@@ -340,7 +340,7 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ReviewRouteDeps
       await authReviewer(req, dealId);
       const body = (req.body ?? {}) as Record<string, unknown>;
       const chainDeal = await readChainDeal(deps, dealId);
-      const draft = draftAward({
+      const draft = await draftAward({
         principalUnits: String(body["principalUnits"] ?? ""),
         quotedFeeUnits: String(body["quotedFeeUnits"] ?? ""),
         buyerFeeBps: Number(body["buyerFeeBps"] ?? 0) as 0 | 5000 | 10000,
@@ -621,9 +621,39 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ReviewRouteDeps
       const deliveredAt = chainDeal ? num(chainDeal["deliveredAt"]) : 0;
       const disputeOpenedAt = chainDeal ? num(chainDeal["disputeOpenedAt"]) : 0;
       const escalatedAt = chainDeal ? num(chainDeal["escalatedAt"]) : 0;
-      const selfResolutionEnd = deliveredAt > 0 ? deliveredAt + SELF_RESOLUTION_SECONDS : null;
-      const escalationEnd =
-        disputeOpenedAt > 0 ? disputeOpenedAt + SELF_RESOLUTION_SECONDS + ESCALATION_WINDOW_SECONDS : null;
+      // Prefer the contract's authoritative outage-adjusted windows when the
+      // reader exposes them; otherwise derive from the DISPUTE OPEN (the
+      // negotiation clock starts at openDispute, never at delivery).
+      const readerWithDeadlines = deps.reader as unknown as {
+        effectiveDeadlines?: (
+          hub: Address,
+          dealId: Hash,
+        ) => Promise<{ negotiation: bigint; escalation: bigint; available: boolean }>;
+      } | null;
+      let effective: { negotiation: bigint; escalation: bigint; available: boolean } | null = null;
+      if (
+        chainDeal &&
+        deps.hub &&
+        readerWithDeadlines &&
+        typeof readerWithDeadlines.effectiveDeadlines === "function"
+      ) {
+        try {
+          effective = await readerWithDeadlines.effectiveDeadlines(deps.hub, dealId as Hash);
+        } catch {
+          effective = null;
+        }
+      }
+      const disputeOpen = disputeOpenedAt > 0;
+      const selfResolutionEnd = disputeOpen
+        ? effective?.available
+          ? Number(effective.negotiation)
+          : disputeOpenedAt + SELF_RESOLUTION_SECONDS
+        : null;
+      const escalationEnd = disputeOpen
+        ? effective?.available
+          ? Number(effective.escalation)
+          : disputeOpenedAt + SELF_RESOLUTION_SECONDS + ESCALATION_WINDOW_SECONDS
+        : null;
       return {
         dealId,
         claimantBond,
@@ -640,6 +670,7 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ReviewRouteDeps
           deliveredAt: chainDeal ? String(deliveredAt) : null,
           disputeOpenedAt: chainDeal ? String(disputeOpenedAt) : null,
           escalatedAt: chainDeal ? String(escalatedAt) : null,
+          available: effective ? effective.available : null,
           selfResolutionEnd: selfResolutionEnd !== null ? String(selfResolutionEnd) : null,
           escalationEnd: escalationEnd !== null ? String(escalationEnd) : null,
           deadlines: deadlineSummary(chainDeal, nowSeconds),
@@ -674,7 +705,7 @@ export function registerReviewRoutes(app: FastifyInstance, deps: ReviewRouteDeps
       const seller = str("seller");
       const proposerSignature = str("proposerSignature");
       const hub = str("hub");
-      const proposal = proposeSettlement(
+      const proposal = await proposeSettlement(
         dealId,
         {
           proposer: wallet,

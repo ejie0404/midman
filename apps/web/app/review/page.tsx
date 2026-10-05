@@ -122,7 +122,7 @@ export default function ReviewConsolePage() {
                       <a href={`/review/${item.dealId}`}>{item.dealId.slice(0, 12)}…</a>
                     </td>
                     <td>
-                      <span style={{ border: "1px solid #999", borderRadius: 4, padding: "1px 6px" }}>
+                      <span style={{ border: "1px solid var(--border-strong)", borderRadius: 4, padding: "1px 6px" }}>
                         {item.phase || "—"}
                       </span>
                     </td>

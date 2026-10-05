@@ -64,6 +64,9 @@ export const REQUIRED_SUITES = [
   {
     id: 'node-suites',
     required: true,
+    // One pg-integration test is gated on DATABASE_URL; that single documented
+    // skip is allowed, but any OTHER skipped test still blocks the pass.
+    allowSkips: true,
     description: 'workspace node test suites',
     command: PNPM,
     args: ['-r', 'test'],
@@ -86,6 +89,9 @@ export const REQUIRED_SUITES = [
   {
     id: 'forge-test',
     required: true,
+    // Fork tests self-skip without BASE_RPC_URL; that documented gate is
+    // allowed, while any other skipped contract test blocks the pass.
+    allowSkips: true,
     description: 'contract unit/fuzz/invariant tests',
     command: 'forge',
     args: ['test'],
@@ -183,6 +189,18 @@ export function classifyOutcome(outcome = {}, { optional = false, suite = {} } =
   return { status: 'fail', detail: `exit ${outcome.status}` };
 }
 
+/// @notice Count tests that a suite reported as SKIPPED. An exit-0 suite that
+/// silently skipped tests must not be counted as a clean pass.
+export function detectSkips(output = '') {
+  const text = String(output);
+  let total = 0;
+  for (const match of text.matchAll(/(?:ℹ|#)\s*skipped\s+(\d+)/gi)) total += Number(match[1]);
+  for (const match of text.matchAll(/(?:^|\n)\s*(\d+)\s+skipped\b/gi)) {
+    total = Math.max(total, Number(match[1]));
+  }
+  return total;
+}
+
 /// @notice Pure orchestration: every suite is executed through the injected
 /// `run` function, results classified, then adversarial coverage asserted from
 /// the captured output. Tests inject a stubbed `run`.
@@ -202,8 +220,19 @@ export async function verifyRelease(options = {}) {
       outcome = { error: error || new Error('runner threw') };
     }
     const classified = classifyOutcome(outcome, { optional, suite });
-    outputs[suite.id] = `${(outcome && outcome.stdout) || ''}\n${(outcome && outcome.stderr) || ''}`;
-    checks.push({ id: `suite.${suite.id}`, status: classified.status, detail: classified.detail });
+    const suiteOutput = `${(outcome && outcome.stdout) || ''}\n${(outcome && outcome.stderr) || ''}`;
+    outputs[suite.id] = suiteOutput;
+    let status = classified.status;
+    let detail = classified.detail;
+    // A required suite that exits 0 while skipping tests is NOT a clean pass.
+    if (status === 'pass' && suite.required !== false && suite.allowSkips !== true) {
+      const skips = detectSkips(suiteOutput);
+      if (skips > 0) {
+        status = 'unresolved';
+        detail = `${skips} test(s) skipped in a required suite`;
+      }
+    }
+    checks.push({ id: `suite.${suite.id}`, status, detail });
     if (verbose && classified.status === 'fail') {
       const tail = String((outcome && outcome.stdout) || '')
         .split(/\r?\n/)
@@ -240,7 +269,10 @@ export async function verifyRelease(options = {}) {
   const failures = checks.filter((check) => check.status === 'fail').length;
   const skipped = checks.filter((check) => check.status === 'skipped').length;
   const unresolved = checks.filter((check) => check.status === 'unresolved').length;
-  return { ok: failures === 0, failures, skipped, unresolved, optional, checks };
+  // Mandatory runs fail on required-unresolved (skipped-required / uncovered
+  // scenario); optional mode downgrades tool-absence to skipped.
+  const ok = failures === 0 && (optional || unresolved === 0);
+  return { ok, failures, skipped, unresolved, optional, checks };
 }
 
 export function formatTable(result) {

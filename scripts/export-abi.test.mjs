@@ -244,6 +244,7 @@ describe('policies ABI matches forge artifacts', () => {
       'prunedBefore',
       'outageSaturated',
       'outageSeen',
+      'lastAuditedRound',
       'sequencerFeed',
       'feePolicies',
       'categoryPolicies',

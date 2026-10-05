@@ -82,6 +82,7 @@ const REQUIRED_POLICIES_FUNCTIONS = [
   'prunedBefore',
   'outageSaturated',
   'outageSeen',
+  'lastAuditedRound',
   'sequencerFeed',
   'feePolicies',
   'categoryPolicies',

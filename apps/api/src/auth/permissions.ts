@@ -31,7 +31,11 @@ export interface AuthedRequest extends FastifyRequest {
 
 /** Require a valid session; throws 401 otherwise. */
 export function requireAuth(req: FastifyRequest): Session {
-  const session = (req as AuthedRequest).session ?? readSession(req);
+  const attached = (req as AuthedRequest).session;
+  // `undefined` => the auth guard did not run (direct handler/test call).
+  // `null` => the guard ran and rejected the session (missing/expired/revoked);
+  // never fall back to a re-read, which could resurrect a durably revoked nonce.
+  const session = attached === undefined ? readSession(req) : attached;
   if (!session) throw httpError(401, "Authentication required");
   return session;
 }

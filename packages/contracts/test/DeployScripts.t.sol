@@ -62,7 +62,9 @@ contract DeployScriptsTest is Test, DeployProdBase, DeployDevBase {
         c = ProdConfig({
             chainId: block.chainid,
             usdc: address(new MockUSDC()),
-            feed: FEED,
+            // A real feed is required: the policies constructor seeds its
+            // coverage watermark from the live latestRoundData.
+            feed: address(new MockFeed()),
             governance: GOV,
             pauser: PAUSER,
             admissionSigner: ADMISSION,
@@ -112,7 +114,7 @@ contract DeployScriptsTest is Test, DeployProdBase, DeployDevBase {
         assertEq(pol.pauser(), PAUSER, "pauser");
         assertEq(pol.admissionSigner(), ADMISSION, "admission");
         assertEq(pol.treasury(), TREASURY, "treasury");
-        assertEq(pol.sequencerFeed(), FEED, "feed");
+        assertEq(pol.sequencerFeed(), cfg.feed, "feed");
         assertEq(address(hub.usdc()), cfg.usdc, "hub.usdc");
         assertEq(address(hub.policies()), out.policies, "hub.policies");
 

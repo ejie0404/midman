@@ -57,6 +57,7 @@ contract ArbitrationTest is Test {
     bytes32 feePolicy = keccak256("FEEv1");
     bytes32 categoryPolicy = keccak256("CATv1");
     bytes32 noReadiness = keccak256("READY-NONE");
+    bytes32 readinessPolicy = keccak256("READY-REQ");
     bytes32 evidencePolicy = keccak256("EVIv1");
     bytes32 bondPolicy = keccak256("BONDv1");
     bytes32 arbPolicy = keccak256("ARBv1");
@@ -90,6 +91,7 @@ contract ArbitrationTest is Test {
         policies.registerFeePolicy(feePolicy, keccak256("fee-content"));
         policies.registerCategoryPolicy(categoryPolicy, keccak256("cat-content"), 3_600);
         policies.registerReadinessPolicy(noReadiness, keccak256("ready-content"), false);
+        policies.registerReadinessPolicy(readinessPolicy, keccak256("ready-req-content"), true);
         policies.registerEvidencePolicy(evidencePolicy, keccak256("evi-content"));
         policies.registerBondPolicy(bondPolicy, keccak256("bond-content"), BOND, BOND);
         policies.registerArbitrationPolicy(arbPolicy, keccak256("arb-content"), 0x07);
@@ -122,8 +124,8 @@ contract ArbitrationTest is Test {
         t.deliveryPeriodSeconds = 3_600;
         t.inspectionPeriodSeconds = 3_600;
         t.categoryPolicyId = categoryPolicy;
-        t.readinessPolicyId = noReadiness;
-        t.readinessConsentHash = bytes32(0);
+        t.readinessPolicyId = readinessPolicy;
+        t.readinessConsentHash = keccak256("ready-consent");
         t.evidencePolicyId = evidencePolicy;
         t.bondPolicyId = bondPolicy;
         t.arbitrationPolicyId = arbPolicy;
@@ -156,12 +158,22 @@ contract ArbitrationTest is Test {
         bytes32 anonce = keccak256(abi.encode("adm", dealId));
         uint64 exp = uint64(_now() + 1 days);
         bytes32 adigest =
-            hub.actionDigest(keccak256(abi.encode(MidmanDK.ADMISSION_TYPEHASH, digest, bytes32(0), anonce, exp, true)));
-        adm = Admission({minPolicyId: bytes32(0), admissionNonce: anonce, expiresAt: exp, signature: _sig(admissionPk, adigest)});
+            hub.actionDigest(keccak256(abi.encode(MidmanDK.ADMISSION_TYPEHASH, digest, categoryPolicy, anonce, exp, true)));
+        adm = Admission({minPolicyId: categoryPolicy, admissionNonce: anonce, expiresAt: exp, signature: _sig(admissionPk, adigest)});
     }
 
-    function _ready() internal pure returns (ReadinessAuth memory) {
-        return ReadinessAuth({attestedAt: 0, nonce: bytes32(0), expiresAt: 0, signature: new bytes(0)});
+    function _ready(DealTerms memory t, bytes32 digest) internal view returns (ReadinessAuth memory r) {
+        uint64 attestedAt = uint64(_now());
+        uint64 expiresAt = uint64(_now() + 2 hours);
+        bytes32 nonce = keccak256(abi.encode("ready", t.dealId));
+        bytes32 rdigest = hub.actionDigest(
+            keccak256(
+                abi.encode(
+                    MidmanDK.READINESS_TYPEHASH, t.dealId, digest, t.buyerAddress, attestedAt, nonce, expiresAt
+                )
+            )
+        );
+        r = ReadinessAuth({attestedAt: attestedAt, nonce: nonce, expiresAt: expiresAt, signature: _sig(buyerPk, rdigest)});
     }
 
     function _fundedAmount(DealTerms memory t) internal pure returns (uint256) {
@@ -182,7 +194,7 @@ contract ArbitrationTest is Test {
         AllowanceIntent memory intent =
             AllowanceIntent({paymentSalt: salt, nonce: inonce, expiresAt: exp, signature: _sig(buyerPk, idigest)});
         Payment3009 memory nopay;
-        hub.fund(t, _sig(buyerPk, digest), _sig(sellerPk, digest), nopay, intent, _admission(digest, t.dealId), _ready());
+        hub.fund(t, _sig(buyerPk, digest), _sig(sellerPk, digest), nopay, intent, _admission(digest, t.dealId), _ready(t, digest));
     }
 
     function _deliverDirect(bytes32 dealId) internal {

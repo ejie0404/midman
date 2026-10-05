@@ -36,7 +36,17 @@ export async function progressionPass(params: {
       continue;
     }
     if (deal["funded"] !== true || Number(deal["phase"]) === 9) continue;
-    const action = dueAction(deal, params.nowSeconds);
+    // Prefer the contract's authoritative outage-adjusted deadlines when the
+    // reader exposes the view; otherwise fall back to original + margin.
+    let deadlines: EffectiveDeadlines | null = null;
+    if (typeof params.reader.effectiveDeadlines === "function") {
+      try {
+        deadlines = await params.reader.effectiveDeadlines(params.hub, dealId as Hash);
+      } catch {
+        deadlines = null;
+      }
+    }
+    const action = dueAction(deal, params.nowSeconds, deadlines);
     if (!action) continue;
     const key = `${dealId.toLowerCase()}:${action}:${dayWindow(params.nowSeconds)}`;
     const { inserted } = await params.store.enqueueRelay({
@@ -54,42 +64,68 @@ export async function progressionPass(params: {
   return enqueued;
 }
 
-/** Original-deadline derivation (contract applies outage adjustments). */
+/** Authoritative outage-adjusted deadlines as returned by `effectiveDeadlines`. */
+export interface EffectiveDeadlines {
+  readonly delivery: bigint;
+  readonly inspection: bigint;
+  readonly negotiation: bigint;
+  readonly escalation: bigint;
+  readonly evidence: bigint;
+  readonly primary: bigint;
+  readonly fallbackEnd: bigint;
+  readonly available: boolean;
+}
+
+/**
+ * Derive the due housekeeping action. When the contract's `effectiveDeadlines`
+ * view is available it is used directly (no margin): a deadline that is already
+ * outage-adjusted must not be padded. When the view reports `available=false`
+ * the clocks are UNKNOWN, so NO time-derived action is enqueued. With no view
+ * at all, fall back to original deadlines + a 1h margin.
+ */
 export function dueAction(
   deal: Record<string, bigint | string | boolean | number>,
   nowSeconds: number,
+  deadlines?: EffectiveDeadlines | null,
 ): string | null {
   const phase = Number(deal["phase"]);
   const at = (field: string, period: string): number => num(deal[field]) + num(deal[period]);
+  if (deadlines && !deadlines.available) return null;
+  const end = (authoritative: bigint | undefined, fallback: number): number =>
+    deadlines && authoritative !== undefined ? Number(authoritative) : fallback;
   switch (phase) {
     case 0: {
-      if (nowSeconds >= at("fundedAt", "deliveryPeriod") + MARGIN) return "refundForNonDelivery";
+      const target = end(deadlines?.delivery, at("fundedAt", "deliveryPeriod") + MARGIN);
+      if (target > 0 && nowSeconds >= target) return "refundForNonDelivery";
       return null;
     }
     case 1: {
-      if (nowSeconds >= at("deliveredAt", "inspectionPeriod") + MARGIN) return "finalizeAfterTimeout";
+      const target = end(deadlines?.inspection, at("deliveredAt", "inspectionPeriod") + MARGIN);
+      if (target > 0 && nowSeconds >= target) return "finalizeAfterTimeout";
       return null;
     }
     case 2:
     case 3: {
-      const opened = num(deal["disputeOpenedAt"]);
-      if (nowSeconds >= opened + 172_800 + MARGIN) return "lapseDispute";
+      const target = end(deadlines?.escalation, num(deal["disputeOpenedAt"]) + 172_800 + MARGIN);
+      if (target > 0 && nowSeconds >= target) return "lapseDispute";
       return null;
     }
     case 4: {
-      if (nowSeconds >= num(deal["escalatedAt"]) + 86_400 + MARGIN) return "advanceToPrimary";
+      const target = end(deadlines?.evidence, num(deal["escalatedAt"]) + 86_400 + MARGIN);
+      if (target > 0 && nowSeconds >= target) return "advanceToPrimary";
       return null;
     }
     case 5: {
-      // Primary end derives from the evidence end; recompute conservatively.
-      const evidenceEnd = num(deal["escalatedAt"]) + 86_400;
-      if (nowSeconds >= evidenceEnd + 604_800 + MARGIN) return "activateFallback";
+      const fallback = num(deal["escalatedAt"]) + 86_400 + 604_800 + MARGIN;
+      const target = end(deadlines?.primary, fallback);
+      if (target > 0 && nowSeconds >= target) return "activateFallback";
       return null;
     }
     case 6: {
       if (deal["rulingQueued"] === true) return null;
       const started = num(deal["fallbackStartedAt"]);
-      if (started > 0 && nowSeconds >= started + 604_800 + MARGIN) return "markDeadlock";
+      const target = end(deadlines?.fallbackEnd, started + 604_800 + MARGIN);
+      if (started > 0 && target > 0 && nowSeconds >= target) return "markDeadlock";
       return null;
     }
     case 7: {

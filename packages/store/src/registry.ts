@@ -59,6 +59,10 @@ export interface RegistryAdapter {
   getVersioned?<T>(ns: string, dealId: string, key: string): Promise<{ value: T; version: number } | null>;
   /** Optional versioned write. Must throw on a stale expectedVersion. */
   putVersioned?<T>(ns: string, dealId: string, key: string, value: T, expectedVersion: number): Promise<number>;
+  /** Optional create-only write; returns false when the key already exists. */
+  putIfAbsent?<T>(ns: string, dealId: string, key: string, value: T): Promise<boolean>;
+  /** Optional monotonic sequence allocator for append-only keys. */
+  nextSeq?(name: string): Promise<number>;
 }
 
 /** Ordered key helper for append-only sequences (manifest seq, message seq…). */
@@ -74,6 +78,16 @@ export class MemoryRegistry implements RegistryAdapter {
   constructor(backing: RegistryBacking = new Map(), versions: VersionBacking = new Map()) {
     this.backing = backing;
     this.versions = versions;
+  }
+
+  async nextSeq(name: string): Promise<number> {
+    // Store the counter in the SHARED backing so two adapter instances over one
+    // backing (the cross-instance scenario) never allocate the same sequence.
+    const map = this.dealMap("__seq__", name, true)!;
+    const current = (map.get("value") as number | undefined) ?? 0;
+    const next = current + 1;
+    map.set("value", next);
+    return next;
   }
 
   private nsMap(ns: string, create: boolean): Map<string, Map<string, unknown>> | undefined {
@@ -145,6 +159,14 @@ export class MemoryRegistry implements RegistryAdapter {
     return next;
   }
 
+  async putIfAbsent<T>(ns: string, dealId: string, key: string, value: T): Promise<boolean> {
+    const map = this.dealMap(ns, dealId, false);
+    if (map?.has(key)) return false;
+    this.dealMap(ns, dealId, true)!.set(key, value);
+    this.versionMap(ns, dealId, true)!.set(key, 1);
+    return true;
+  }
+
   async delete(ns: string, dealId: string, key: string): Promise<void> {
     this.dealMap(ns, dealId, false)?.delete(key);
     this.versionMap(ns, dealId, false)?.delete(key);
@@ -169,6 +191,9 @@ export interface RegistryKvStore {
   kvDeals?(ns: string): Promise<string[]>;
   kvGetWithVersion?(ns: string, dealId: string, key: string): Promise<{ value: unknown; version: number } | null>;
   kvPutCas?(ns: string, dealId: string, key: string, value: unknown, expectedVersion: number): Promise<number>;
+  kvPutIfAbsent?(ns: string, dealId: string, key: string, value: unknown): Promise<boolean>;
+  /** DB-backed monotonic counter (Store.nextSeq); enables cross-instance sequences. */
+  nextSeq?(name: string): Promise<number>;
 }
 
 /** True when a Store-like object exposes the registry kv surface. */
@@ -254,6 +279,24 @@ export class SqlRegistry implements RegistryAdapter {
     if (typeof this.store.kvDeals === "function") return this.store.kvDeals(ns);
     return [];
   }
+
+  async putIfAbsent<T>(ns: string, dealId: string, key: string, value: T): Promise<boolean> {
+    if (!this.durable) return this.fallback.putIfAbsent(ns, dealId, key, value);
+    if (typeof this.store.kvPutIfAbsent === "function") {
+      return this.store.kvPutIfAbsent(ns, dealId, key, value);
+    }
+    const existing = await this.get(ns, dealId, key);
+    if (existing !== null) return false;
+    await this.put(ns, dealId, key, value);
+    return true;
+  }
+
+  async nextSeq(name: string): Promise<number> {
+    if (!this.durable) return this.fallback.nextSeq(name);
+    if (typeof this.store.nextSeq === "function") return this.store.nextSeq(name);
+    // No durable counter available: fall back to the process-local sequence.
+    return this.fallback.nextSeq(name);
+  }
 }
 
 /** Selects a durable adapter when the Store exposes kv methods, else memory. */
@@ -320,6 +363,40 @@ export class RegistryWriter {
     });
   }
 
+  /**
+   * Allocate the next monotonic sequence for `name`. Uses the adapter's
+   * DB-backed counter when present (so two API instances never allocate the
+   * same number), else a process-local counter.
+   */
+  private readonly localSeq = new Map<string, number>();
+  async nextSeq(name: string): Promise<number> {
+    const adapter = this.adapter;
+    if (adapter?.nextSeq) return adapter.nextSeq(name);
+    const next = (this.localSeq.get(name) ?? 0) + 1;
+    this.localSeq.set(name, next);
+    return next;
+  }
+
+  /** Versioned read through the adapter (null when no durable adapter is set). */
+  async getVersioned<T>(ns: string, dealId: string, key: string): Promise<{ value: T; version: number } | null> {
+    const adapter = this.adapter;
+    if (!adapter) return null;
+    if (typeof adapter.getVersioned === "function") return adapter.getVersioned<T>(ns, dealId, key);
+    const value = await adapter.get<T>(ns, dealId, key);
+    return value === null ? null : { value, version: 0 };
+  }
+
+  /** Create-only durable write; see RegistryAdapter.putIfAbsent. */
+  async putIfAbsent<T>(ns: string, dealId: string, key: string, value: T): Promise<boolean> {
+    const adapter = this.adapter;
+    if (!adapter) return false;
+    if (typeof adapter.putIfAbsent === "function") return adapter.putIfAbsent(ns, dealId, key, value);
+    const existing = await adapter.get(ns, dealId, key);
+    if (existing !== null) return false;
+    await adapter.put(ns, dealId, key, value);
+    return true;
+  }
+
   /** Fire-and-forget durable write: logs (never rejects) on failure. */
   async putSafe<T>(ns: string, dealId: string, key: string, value: T): Promise<void> {
     try {
@@ -351,6 +428,11 @@ export class RegistryWriter {
   /** Resolves once every queued durable write has settled. */
   async flush(): Promise<void> {
     await this.tail;
+  }
+
+  /** Test helper: clear the process-local sequence counters. */
+  resetSequences(): void {
+    this.localSeq.clear();
   }
 }
 
@@ -398,6 +480,12 @@ export class DurableCollection<T> {
 
   get(dealId: string, key: string): T | null {
     return this.deal(dealId, false)?.get(key) ?? null;
+  }
+
+  /** Publish a value to the in-memory cache WITHOUT a durable write. Use after
+   * the durable state was already committed through another path. */
+  remember(dealId: string, key: string, value: T): void {
+    this.deal(dealId, true)!.set(key, value);
   }
 
   list(dealId: string): T[] {

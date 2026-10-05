@@ -121,6 +121,17 @@ contract MidmanPolicies {
     uint256 public constant MAX_RETAINED = 256;
     uint256 public constant MAX_HISTORY_AGE = 180 days;
 
+    // ---- History coverage watermark (completeness proof) ----
+    // Chainlink uptime feeds mint a round on EVERY status transition (up->down
+    // or down->up), so rounds are consecutive. `lastAuditedRound` is the highest
+    // feed round whose status has been consumed into the ledger: seeded at
+    // construction from the live head, then advanced only by reportOutage, which
+    // must consume the NEXT un-audited down round (roundId == lastAuditedRound+1)
+    // together with its recovery. An unreported transition therefore leaves the
+    // watermark behind the head, and deadline math reports history UNKNOWN rather
+    // than a deadline computed from an incomplete ledger.
+    uint80 public lastAuditedRound;
+
     // ---- Events ----
     event PolicyRegistered(bytes32 indexed policyId, bytes32 contentHash);
     event PanelProposed(uint64 effectiveAt);
@@ -128,6 +139,7 @@ contract MidmanPolicies {
     event AddressProposed(bytes32 indexed role, address value, uint64 effectiveAt);
     event AddressRotated(bytes32 indexed role, address value);
     event OutageRecorded(uint64 start, uint64 end);
+    event OutageAudited(uint80 indexed roundId);
     event GovernanceTransferred(address indexed next);
 
     error NotGovernance();
@@ -162,6 +174,19 @@ contract MidmanPolicies {
         sequencerFeed = sequencerFeed_;
         authEpoch = 1;
         _setPanel(1, primary_, fallback_, veto_);
+        // Seed the coverage watermark from the live feed head. A down head
+        // means the newest round is the ongoing outage; the prior round (its
+        // recovery boundary) is the last fully audited one. All history before
+        // the head is irrelevant: every deal anchor is >= deploy time.
+        {
+            (bool ok, bytes memory ret) =
+                sequencerFeed_.staticcall(abi.encodeWithSignature("latestRoundData()"));
+            require(ok && ret.length == 160, BadPanel());
+            (uint80 rid, int256 ans, uint256 st,, uint80 air) =
+                abi.decode(ret, (uint80, int256, uint256, uint256, uint80));
+            require(rid != 0 && air == rid && st != 0 && st <= block.timestamp, BadPanel());
+            lastAuditedRound = ans == 0 || rid == 0 ? rid : rid - 1;
+        }
     }
 
     /// @notice Panel admission rules (P-05/P-15): a required 5-member primary
@@ -373,6 +398,10 @@ contract MidmanPolicies {
     /// a late historical report can never age out a live interval. Retained
     /// intervals older than MAX_HISTORY_AGE are pruned by absolute age only.
     function reportOutage(uint80 roundId) external {
+        // Completeness: only the next un-audited transition may be consumed, so
+        // a skipped/unreported outage leaves the watermark short of the head and
+        // blocks deadline math instead of silently shortening a clock.
+        require(roundId == lastAuditedRound + 1, BadPanel());
         uint64 s;
         uint64 e;
         {
@@ -399,7 +428,11 @@ contract MidmanPolicies {
         outageLedger.push(Outage({start: s, end: e}));
         outageTotal += 1;
         if (outageLedger.length > MAX_RETAINED) outageSaturated = true;
+        // Consume the down round AND its recovery, keeping the watermark in step
+        // with the feed's consecutive round sequence.
+        lastAuditedRound = roundId + 1;
         emit OutageRecorded(s, e);
+        emit OutageAudited(roundId + 1);
     }
 
     /// @notice Compact retained intervals: drop any whose end is strictly older

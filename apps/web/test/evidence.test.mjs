@@ -274,9 +274,21 @@ describe("evidence API wrappers (mocked fetch)", () => {
     assert.ok(String(captured.init.headers["content-type"]).startsWith("multipart/form-data; boundary="));
     assert.ok(captured.init.headers["x-wallet-signature"], "signed");
     // Server rule: multipart boundaries are not canonical, so the signature
-    // covers the EMPTY body hash while the real bytes are transmitted.
+    // covers the EMPTY body hash while the metadata binds the parsed fields.
     const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    assert.ok(signedMessage.includes(`/deals/0xdeal/evidence\n${EMPTY_SHA256}\n`), "empty-hash signed");
+    assert.ok(signedMessage.startsWith("MidmanEvidenceAuth|v1\n"), "metadata-bound message");
+    assert.ok(signedMessage.includes("path: /deals/0xdeal/evidence\n"), "path bound");
+    assert.ok(signedMessage.includes("action: evidence.upload\n"), "action bound");
+    assert.ok(signedMessage.includes("filename: proof.txt\n"), "filename bound");
+    assert.ok(signedMessage.includes("mime: text/plain\n"), "mime bound");
+    assert.ok(signedMessage.includes("size: 13\n"), "size bound");
+    assert.ok(signedMessage.includes(`bodySha256: ${EMPTY_SHA256}\n`), "empty-hash signed");
+    assert.equal(captured.init.headers["x-request-action"], "evidence.upload");
+    assert.equal(captured.init.headers["x-request-deal"], "0xdeal");
+    assert.ok(captured.init.headers["x-request-nonce"], "nonce header present");
+    assert.equal(captured.init.headers["x-request-filename"], "proof.txt");
+    assert.equal(captured.init.headers["x-request-mime"], "text/plain");
+    assert.equal(captured.init.headers["x-request-size"], "13");
     assert.ok(!signedMessage.includes(await sha256hex(captured.init.body)), "raw bytes not signed");
   });
 

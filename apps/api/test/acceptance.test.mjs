@@ -28,6 +28,11 @@ import { MemoryStore } from "../dist/db.js";
 import { registerRoutes } from "../dist/routes.js";
 import { registerEvidenceRoutes } from "../dist/evidence/routes.js";
 import {
+  EVIDENCE_AUTH_APP,
+  buildMetadataSignedMessage,
+  evidenceAuthDomain,
+} from "../dist/evidence/access.js";
+import {
   registerCategoryRoutes,
   registerMessageRoutes,
   registerCommitmentRoutes,
@@ -149,16 +154,44 @@ async function uploadEvidence(app, dealId, account, { bytes, filename, contentTy
   const boundary = "----midman-phase11-boundary";
   const body = buildMultipartBody(boundary, { kind, description }, { filename, contentType, bytes });
   const url = `/deals/${dealId}/evidence`;
+  // Evidence mutations require the metadata-bound signature, bound to the
+  // parsed multipart filename/mime/size/content hash.
+  const expiry = String(Math.floor(Date.now() / 1_000) + 300);
+  const nonce = randomBytes(16).toString("hex");
+  const fileHash = sha256hex(bytes);
+  const mime = contentType || "application/octet-stream";
+  const message = buildMetadataSignedMessage({
+    app: EVIDENCE_AUTH_APP,
+    domain: evidenceAuthDomain(),
+    method: "POST",
+    path: url,
+    dealId,
+    action: "evidence.upload",
+    fileHash,
+    filename,
+    mime,
+    size: String(bytes.length),
+    bodySha256: sha256hex(Buffer.alloc(0)),
+    nonce,
+    expiry,
+  });
+  const signature = await account.signMessage({ message });
   return app.inject({
     method: "POST",
     url,
-    headers: await signHeaders(
-      account,
-      "POST",
-      url,
-      Buffer.alloc(0),
-      `multipart/form-data; boundary=${boundary}`,
-    ),
+    headers: {
+      "x-wallet-address": account.address,
+      "x-wallet-expiry": expiry,
+      "x-wallet-signature": signature,
+      "x-request-nonce": nonce,
+      "x-request-action": "evidence.upload",
+      "x-request-deal": dealId,
+      "x-request-file": fileHash,
+      "x-request-filename": filename,
+      "x-request-mime": mime,
+      "x-request-size": String(bytes.length),
+      "content-type": `multipart/form-data; boundary=${boundary}`,
+    },
     payload: body,
   });
 }
@@ -778,6 +811,15 @@ describe("Phase 11 acceptance (one app, scripted chain)", () => {  before(async 
     const disputedAt = NOW - 200_000;
     chain.patchDeal(dealId, { phase: 2, disputeUsed: true, disputeOpenedAt: BigInt(disputedAt) });
 
+    // A10: the negotiation window is anchored on DISPUTE OPEN, not delivery.
+    const windows = ok(
+      await call(app, buyer, "GET", `/deals/${dealId}/escalation`),
+      200,
+      "escalation windows",
+    ).json().windows;
+    assert.equal(windows.selfResolutionEnd, String(disputedAt + 86_400));
+    assert.equal(windows.escalationEnd, String(disputedAt + 172_800));
+
     const later = disputedAt + 172_800 + 3_600 + 1;
     assert.equal(dueAction(baseDeal({ ...chain.deals.get(dealId) }), later), "lapseDispute");
     const enqueued = await progressionPass({ store, reader: chain.reader, hub: HUB, nowSeconds: later });
@@ -861,16 +903,32 @@ describe("Phase 11 acceptance (one app, scripted chain)", () => {  before(async 
     const created = await createAcceptedDraft(app);
     const { dealId } = created;
     chain.setDeal(dealId, baseDeal({ phase: 4, claimantBond: 5_000_000n, respondentBond: 5_000_000n }));
+    const domain = { name: "MidmanEscrow", version: "1", chainId: CHAIN_ID, verifyingContract: HUB };
+    const settlementNonce = "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e";
+    const expiresAt = Math.floor(Date.now() / 1_000) + 3_600;
     const base = {
       sellerAwardUnits: "60000000",
       buyerCostUnits: "1000000",
       sellerCostUnits: "1000000",
       expectedPhase: 4,
       agreementDigest: EXPLICIT_AGREEMENT,
-      settlementNonce: "0x0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+      settlementNonce,
+      expiresAt: String(expiresAt),
     };
+    // The proposer signs the authoritative envelope BEFORE publishing.
+    const message1 = {
+      dealId,
+      agreementDigest: EXPLICIT_AGREEMENT,
+      sellerAward: 60_000_000n,
+      buyerBondCost: 1_000_000n,
+      sellerBondCost: 1_000_000n,
+      expectedPhase: 4,
+      settlementNonce,
+      expiresAt: BigInt(expiresAt),
+    };
+    const buyerSig = await buyer.signTypedData({ domain, types: MUTUAL_TYPES, primaryType: "MutualSettlement", message: message1 });
     const created1 = ok(
-      await call(app, buyer, "POST", `/deals/${dealId}/settlement-proposals`, base),
+      await call(app, buyer, "POST", `/deals/${dealId}/settlement-proposals`, { ...base, proposerSignature: buyerSig }),
       200,
       "propose",
     ).json();
@@ -878,18 +936,6 @@ describe("Phase 11 acceptance (one app, scripted chain)", () => {  before(async 
     const list = ok(await call(app, buyer, "GET", `/deals/${dealId}/settlement-proposals`), 200, "list").json();
     assert.equal(list.proposals.length, 1);
 
-    const message1 = {
-      dealId: created1.dealId,
-      agreementDigest: created1.agreementDigest,
-      sellerAward: BigInt(created1.sellerAward),
-      buyerBondCost: BigInt(created1.buyerCost),
-      sellerBondCost: BigInt(created1.sellerCost),
-      expectedPhase: created1.expectedPhase,
-      settlementNonce: created1.settlementNonce,
-      expiresAt: BigInt(created1.expiresAt),
-    };
-    const domain = { name: "MidmanEscrow", version: "1", chainId: CHAIN_ID, verifyingContract: HUB };
-    const buyerSig = await buyer.signTypedData({ domain, types: MUTUAL_TYPES, primaryType: "MutualSettlement", message: message1 });
     const sellerSig = await seller.signTypedData({ domain, types: MUTUAL_TYPES, primaryType: "MutualSettlement", message: message1 });
     const accepted = ok(
       await call(app, seller, "POST", `/settlement-proposals/${created1.id}/accept`, {
@@ -912,11 +958,15 @@ describe("Phase 11 acceptance (one app, scripted chain)", () => {  before(async 
     });
     assert.equal(again.statusCode, 409);
 
-    // A superseded nonce: sign struct #1 but submit against a fresh proposal #2.
+    // A superseded nonce: the counterparty signs struct #1 but submits against
+    // a fresh proposal #2 (signed by the proposer for its own envelope).
+    const message2 = { ...message1, sellerAward: 50_000_000n };
+    const buyerSig2 = await buyer.signTypedData({ domain, types: MUTUAL_TYPES, primaryType: "MutualSettlement", message: message2 });
     const created2 = ok(
       await call(app, buyer, "POST", `/deals/${dealId}/settlement-proposals`, {
         ...base,
         sellerAwardUnits: "50000000",
+        proposerSignature: buyerSig2,
       }),
       200,
       "propose 2",
@@ -924,7 +974,7 @@ describe("Phase 11 acceptance (one app, scripted chain)", () => {  before(async 
     const stale = await call(app, seller, "POST", `/settlement-proposals/${created2.id}/accept`, {
       counterparty: seller.address,
       signature: sellerSig,
-      proposerSignature: buyerSig,
+      proposerSignature: buyerSig2,
     });
     assert.equal(stale.statusCode, 400);
     assert.match(stale.json().error, /recover/i);

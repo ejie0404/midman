@@ -144,7 +144,7 @@ export function registerCategoryRoutes(
     if (!result.ok) return reply.code(400).send({ ok: false, errors: result.errors });
     const data = body["data"] as Record<string, unknown>;
     const deliveryManifestHash = hashDeliveryManifest(request.params.dealId, category, data);
-    const record = forms.set({
+    const record = await forms.set({
       dealId: request.params.dealId,
       category,
       data,
@@ -182,7 +182,7 @@ export function registerMessageRoutes(
     const body = (request.body ?? {}) as Record<string, unknown>;
     const result = validateMessageText(body["text"]);
     if (!result.ok) return reply.code(400).send({ ok: false, errors: result.errors });
-    return threads.append(request.params.dealId, authed.wallet, body["text"] as string);
+    return await threads.append(request.params.dealId, authed.wallet, body["text"] as string);
   });
 
   app.get<{ Params: { dealId: string } }>("/deals/:dealId/messages", async (request, reply) => {

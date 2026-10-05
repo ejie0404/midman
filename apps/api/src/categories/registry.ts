@@ -21,8 +21,12 @@ export interface DeliveryFormRecord {
 }
 
 export interface DeliveryFormRegistry {
-  /** Store a form as the single active form for the deal; keeps versioned history. */
-  set(input: Omit<DeliveryFormRecord, "version">): DeliveryFormRecord;
+  /**
+   * Store a form as the single active form for the deal; keeps versioned
+   * history. Resolves only once the durable write has committed, and allocates
+   * the version from a durable counter so concurrent instances do not collide.
+   */
+  set(input: Omit<DeliveryFormRecord, "version">): Promise<DeliveryFormRecord>;
   get(dealId: string): DeliveryFormRecord | null;
   history(dealId: string): DeliveryFormRecord[];
   clear(): void;
@@ -46,15 +50,16 @@ export class InMemoryDeliveryFormRegistry implements DeliveryFormRegistry {
     await this.forms.hydrate(dealIds);
   }
 
-  set(input: Omit<DeliveryFormRecord, "version">): DeliveryFormRecord {
+  async set(input: Omit<DeliveryFormRecord, "version">): Promise<DeliveryFormRecord> {
     const key = input.dealId.toLowerCase();
-    const version = this.forms.size(key) + 1;
+    const version = await this.writer.nextSeq(`${FORM_NS}:${key}`);
     const record: DeliveryFormRecord = {
       ...input,
       data: { ...input.data },
       version,
     };
-    void this.forms.set(key, orderedKey(version), record);
+    // Await the durable write: a blocked/failed write must not return success.
+    await this.forms.set(key, orderedKey(version), record);
     return { ...record, data: { ...record.data } };
   }
 
@@ -84,8 +89,11 @@ export interface ThreadMessage {
 }
 
 export interface MessageThreadRegistry {
-  /** Append a message; sequence numbers are per-deal, starting at 1. */
-  append(dealId: string, author: string, text: string): ThreadMessage;
+  /**
+   * Append a message; sequence numbers are per-deal, starting at 1 and drawn
+   * from a durable counter. Resolves only once the durable write has committed.
+   */
+  append(dealId: string, author: string, text: string): Promise<ThreadMessage>;
   list(dealId: string): ThreadMessage[];
   clear(): void;
 }
@@ -108,16 +116,17 @@ export class InMemoryMessageThreadRegistry implements MessageThreadRegistry {
     await this.threads.hydrate(dealIds);
   }
 
-  append(dealId: string, author: string, text: string): ThreadMessage {
+  async append(dealId: string, author: string, text: string): Promise<ThreadMessage> {
     const key = dealId.toLowerCase();
-    const seq = this.threads.size(key) + 1;
+    const seq = await this.writer.nextSeq(`${MESSAGE_NS}:${key}`);
     const record: ThreadMessage = {
       seq,
       author,
       text,
       at: new Date().toISOString(),
     };
-    void this.threads.set(key, orderedKey(seq), record);
+    // Await the durable write: a blocked/failed write must not return success.
+    await this.threads.set(key, orderedKey(seq), record);
     return { ...record };
   }
 

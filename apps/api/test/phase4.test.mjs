@@ -1,6 +1,7 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import Fastify from "fastify";
+import { privateKeyToAccount } from "viem/accounts";
 import {
   __resetProposalsForTests,
   MUTUAL_TYPES,
@@ -10,7 +11,9 @@ import {
 import { buildDealDefaults, registerDealMetaRoutes } from "../dist/dealsMeta.js";
 
 const DEAL = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const PROPOSER = "0x2222222222222222222222222222222222222222";
+const PROPOSER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+const proposer = privateKeyToAccount(PROPOSER_KEY);
+const PROPOSER = proposer.address;
 const HUB = "0x00000000000000000000000000000000000000aa";
 const CHAIN_ID = 8453;
 const NONCE_A = "0x1111111111111111111111111111111111111111111111111111111111111111";
@@ -47,6 +50,30 @@ function chainCtx(settlementNonce) {
   return { chainDeal, chainId: CHAIN_ID, hub: HUB };
 }
 
+/** Sign the authoritative MutualSettlement envelope as the proposer. */
+async function signedInput(overrides = {}) {
+  const base = baseInput(overrides);
+  if (base.settlementNonce === undefined) return base;
+  const expiresAt = base.expiresAt ?? Math.floor(Date.now() / 1_000) + 3_600;
+  const withExpiry = { ...base, expiresAt: String(expiresAt) };
+  const proposerSignature = await proposer.signTypedData({
+    domain: { name: "MidmanEscrow", version: "1", chainId: CHAIN_ID, verifyingContract: HUB },
+    types: MUTUAL_TYPES,
+    primaryType: "MutualSettlement",
+    message: {
+      dealId: DEAL,
+      agreementDigest: base.agreementDigest,
+      sellerAward: BigInt(base.sellerAwardUnits),
+      buyerBondCost: BigInt(base.buyerCostUnits),
+      sellerBondCost: BigInt(base.sellerCostUnits),
+      expectedPhase: base.expectedPhase,
+      settlementNonce: base.settlementNonce,
+      expiresAt: BigInt(expiresAt),
+    },
+  });
+  return { ...withExpiry, proposerSignature };
+}
+
 function policyIds() {
   const out = {};
   const keys = ["fee", "category", "readiness", "evidence", "bond", "arbitration", "outage", "catastrophic"];
@@ -72,40 +99,48 @@ describe("Phase 4: mutual settlement nonce is authoritative", () => {
     __resetProposalsForTests();
   });
 
-  it("rejects an absent settlementNonce (no random fallback)", () => {
-    assert.throws(
+  it("rejects an absent settlementNonce (no random fallback)", async () => {
+    await assert.rejects(
       () => proposeSettlement(DEAL, baseInput(), chainCtx()),
       (error) => error.statusCode === 400 && /settlementNonce/i.test(error.message),
     );
   });
 
-  it("rejects a malformed settlementNonce", () => {
-    assert.throws(
+  it("rejects a malformed settlementNonce", async () => {
+    await assert.rejects(
       () => proposeSettlement(DEAL, baseInput({ settlementNonce: "0x1234" }), chainCtx()),
       (error) => error.statusCode === 400 && /settlementNonce/i.test(error.message),
     );
   });
 
-  it("accepts a caller-supplied live nonce when no chain counter is readable", () => {
-    const proposal = proposeSettlement(DEAL, baseInput({ settlementNonce: NONCE_A }), chainCtx());
+  it("accepts a caller-supplied live nonce when no chain counter is readable", async () => {
+    const proposal = await proposeSettlement(DEAL, await signedInput({ settlementNonce: NONCE_A }), chainCtx());
     assert.equal(proposal.settlementNonce, NONCE_A);
     assert.equal(proposal.status, "open");
+    assert.match(proposal.proposerSignature, /^0x[0-9a-fA-F]+$/);
   });
 
-  it("rejects a nonce that conflicts with authoritative chain state", () => {
-    assert.throws(
+  it("rejects a proposal without the proposer signature (A9)", async () => {
+    await assert.rejects(
+      () => proposeSettlement(DEAL, baseInput({ settlementNonce: NONCE_A }), chainCtx()),
+      (error) => error.statusCode === 400 && /proposerSignature/i.test(error.message),
+    );
+  });
+
+  it("rejects a nonce that conflicts with authoritative chain state", async () => {
+    await assert.rejects(
       () => proposeSettlement(DEAL, baseInput({ settlementNonce: NONCE_B }), chainCtx(NONCE_A)),
       (error) => error.statusCode === 400 && /conflict|chain/i.test(error.message),
     );
   });
 
-  it("accepts a nonce that matches authoritative chain state", () => {
-    const proposal = proposeSettlement(DEAL, baseInput({ settlementNonce: NONCE_A }), chainCtx(NONCE_A));
+  it("accepts a nonce that matches authoritative chain state", async () => {
+    const proposal = await proposeSettlement(DEAL, await signedInput({ settlementNonce: NONCE_A }), chainCtx(NONCE_A));
     assert.equal(proposal.settlementNonce, NONCE_A);
   });
 
-  it("produces ONE identical mutualSettlement payload for both parties to sign", () => {
-    const proposal = proposeSettlement(DEAL, baseInput({ settlementNonce: NONCE_A }), chainCtx(NONCE_A));
+  it("produces ONE identical mutualSettlement payload for both parties to sign", async () => {
+    const proposal = await proposeSettlement(DEAL, await signedInput({ settlementNonce: NONCE_A }), chainCtx(NONCE_A));
     const message = mutualSignableMessage(proposal);
     assert.deepEqual(Object.keys(message), [
       "dealId",

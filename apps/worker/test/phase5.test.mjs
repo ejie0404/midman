@@ -272,6 +272,15 @@ describe("Phase 5 · durable sponsor nonce coordination", () => {
     assert.equal(await restarted.allocate(SPONSOR.key), 11);
     assert.equal(await restarted.reserved(SPONSOR.key), 11);
   });
+
+  it("two coordinators observing different pending counts never collide", async () => {
+    const store = new MemoryStore();
+    const a = new SponsorNonceCoordinator(store, async () => 7);
+    const b = new SponsorNonceCoordinator(store, async () => 6);
+    const [n1, n2] = await Promise.all([a.allocate("0xsponsor"), b.allocate("0xsponsor")]);
+    assert.notEqual(n1, n2, "different observed bases must not yield the same nonce");
+    assert.deepEqual([n1, n2].sort((x, y) => x - y), [7, 8]);
+  });
 });
 
 describe("Phase 5 · tx identity persisted before broadcast", () => {
@@ -557,6 +566,24 @@ describe("Phase 5 · indexing serialization and projection reorg", () => {
     assert.equal(reader.maxActive, 1);
   });
 
+  it("a second process cannot advance the cursor while the lock is held", async () => {
+    const store = new MemoryStore();
+    const blocks = chain([
+      [0, H(100), H(100)],
+      [1, H(101), H(100)],
+    ]);
+    const reader = new FakeReader(blocks, []);
+    // Simulate another process holding the cross-process lock.
+    await store.kvPutIfAbsent("indexer.lock", HUB.toLowerCase(), "lock", {
+      owner: "other-process",
+      expiresAt: Date.now() + 60_000,
+    });
+    const indexer = new WorkerIndexer(reader, store, { hub: HUB, fromBlock: 0n });
+    const result = await indexer.tick();
+    assert.equal(result.added, 0);
+    assert.equal(await store.getTip(HUB), null, "a non-holder must not advance the cursor");
+  });
+
   it("corrects job + projection when an included tx is reorged", async () => {
     const store = new MemoryStore();
     const B2 = H(102);
@@ -648,6 +675,25 @@ describe("Phase 5 · degraded admission/capacity", () => {
       nowSeconds: 1_000,
     });
     assert.equal(ctx.degraded, true);
+  });
+
+  it("durableAdmissionContext degrades when every deal read fails (unknown, not zero)", async () => {
+    const store = new MemoryStore();
+    await store.recordDealMeta(DEAL_A, "test");
+    const reader = fakeReader({
+      async getDeal() {
+        throw new Error("rpc-down");
+      },
+    });
+    const ctx = await durableAdmissionContext({
+      store,
+      reader,
+      hub: HUB,
+      buyer: DEAL_A,
+      seller: DEAL_B,
+      nowSeconds: 10_000,
+    });
+    assert.equal(ctx.degraded, true, "unreadable exposure must be unknown");
   });
 
   it("durableAdmissionContext derives active-escalated and pair exposure from chain", async () => {

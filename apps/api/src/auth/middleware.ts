@@ -43,6 +43,7 @@ import {
 } from "../review/registry.js";
 import {
   clearSession,
+  isSessionNonceRevokedDurable,
   issueSession,
   maybeRotateSession,
   readSession,
@@ -406,14 +407,14 @@ export function registerAuthRoutes(app: FastifyInstance, deps: RouteDeps): void 
   });
 
   app.post("/auth/logout", async (req, reply) => {
-    const session = readSession(req);
-    if (session) revokeSessionNonce(session.nonce);
+    const session = req.session !== undefined ? req.session : readSession(req);
+    if (session) await revokeSessionNonce(session.nonce);
     clearSession(reply);
     return { ok: true };
   });
 
   app.get("/auth/session", async (req, reply) => {
-    const session = readSession(req);
+    const session = req.session !== undefined ? req.session : readSession(req);
     if (!session) return { authenticated: false };
     const rotated = maybeRotateSession(reply, session);
     return {
@@ -450,7 +451,10 @@ export function registerAuthRoutes(app: FastifyInstance, deps: RouteDeps): void 
  * Also wires the auth onSend pass (invitation recording + relay redaction).
  */
 export function registerAuthGuards(app: FastifyInstance, deps: RouteDeps): void {
-  app.decorateRequest("session", null);
+  // `undefined` means "guard has not run"; `null` means "checked, no valid
+  // session". Requiring an explicit assignment prevents a fallback re-read from
+  // resurrecting a session the durable blocklist just revoked.
+  app.decorateRequest("session", undefined);
 
   const seen = new Set<string>();
   registeredRoutesByApp.set(app, seen);
@@ -472,7 +476,10 @@ export function registerAuthGuards(app: FastifyInstance, deps: RouteDeps): void 
   });
 
   app.addHook("preHandler", async (req, reply) => {
-    const session = readSession(req);
+    let session = readSession(req);
+    // Cross-instance revocation: a logout on any API instance must invalidate
+    // the nonce here even though the local deny-list has never seen it.
+    if (session && (await isSessionNonceRevokedDurable(session.nonce))) session = null;
     req.session = session;
 
     const method = req.method.toUpperCase();

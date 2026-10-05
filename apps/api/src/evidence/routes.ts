@@ -79,13 +79,6 @@ async function authPartyOrReviewer(
   throw httpError(403, "Wallet is not a party to this deal");
 }
 
-/** Content binding required for uploads in production, or when env opts in. */
-function requireContentBinding(): boolean {
-  const raw = process.env["EVIDENCE_REQUIRE_CONTENT_BINDING"];
-  if (raw === undefined) return process.env["NODE_ENV"] === "production";
-  return raw === "1" || raw.toLowerCase() === "true";
-}
-
 /**
  * Normalized scan state. infected/quarantined/pending/error are not servable;
  * clean/deferred are servable (deferred is NEVER relabeled clean).
@@ -121,7 +114,8 @@ export function registerEvidenceRoutes(app: FastifyInstance, deps: EvidenceRoute
   app.post<{ Params: { dealId: string } }>("/deals/:dealId/evidence", async (req, reply) => {
     try {
       const dealId = req.params.dealId;
-      const { wallet } = await authParty(req, dealId, deps);
+      // Parse first so the signed metadata can be compared against the ACTUAL
+      // uploaded fields (filename/mime/size/content hash).
       let fileBytes: Buffer | null = null;
       let filename = "";
       let mimetype = "";
@@ -143,15 +137,18 @@ export function registerEvidenceRoutes(app: FastifyInstance, deps: EvidenceRoute
       if (kind !== "delivery" && kind !== "dispute") {
         return reply.code(400).send({ error: "kind must be delivery or dispute" });
       }
-      // Content-bound signature: the signed message commits to the file's
-      // sha256, so replaying a signature against different bytes fails here.
-      const declaredContentSha = declaredContentSha256(req);
       const actualContentSha = createHash("sha256").update(fileBytes).digest("hex");
-      if (declaredContentSha === "") {
-        if (requireContentBinding()) {
-          return reply.code(400).send({ error: "x-content-sha256 is required for uploads" });
-        }
-      } else if (declaredContentSha !== actualContentSha) {
+      // Evidence MUTATIONS require the metadata-bound signature, bound to the
+      // parsed upload values (a legacy/content-bound signature is rejected, and
+      // the nonce is consumed durably so it cannot be replayed).
+      const wallet = await verifySignedRequest(req, {
+        requireMetadata: true,
+        expected: { filename, mime: mimetype, size: String(fileBytes.length), fileHash: actualContentSha },
+      });
+      const role = await dealParty(deps.store, deps.reader, deps.hub, dealId, wallet);
+      if (!role) throw httpError(403, "Wallet is not a party to this deal");
+      const declaredContentSha = declaredContentSha256(req);
+      if (declaredContentSha !== "" && declaredContentSha !== actualContentSha) {
         return reply.code(400).send({ error: "x-content-sha256 does not match uploaded bytes" });
       }
       let check;

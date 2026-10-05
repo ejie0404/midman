@@ -184,6 +184,28 @@ describe("RelayProcessor lease + crash recovery", () => {
     assert.equal((await store.getRelay("lease")).attempts, 1);
   });
 
+  it("a non-owning worker never marks a leased job skipped", async () => {
+    const store = new MemoryStore();
+    await enqueue(store, "owned");
+    await store.claimRelayLease("owned", "other-worker", 120);
+    let checked = false;
+    const processor = new RelayProcessor({
+      store,
+      hub: HUB,
+      checkPreconditions: async () => {
+        checked = true;
+        return { ok: false, reason: "would-skip" };
+      },
+      now: () => Math.floor(Date.now() / 1_000),
+      leaseTtlSeconds: 120,
+    });
+    const result = await processor.process("owned");
+    assert.equal(result.status, "already-handled");
+    assert.equal(checked, false, "preconditions must not run while another worker holds the lease");
+    const job = await store.getRelay("owned");
+    assert.equal(job.status, "processing", "the lease owner's job is untouched");
+  });
+
   it("treats a terminal job as already-handled", async () => {
     const store = new MemoryStore();
     await enqueue(store, "done");
@@ -299,6 +321,48 @@ describe("reconcileSubmitted", () => {
     const outcomes = await reconcileSubmitted(store, reader, ["rc-pending"]);
     assert.equal(outcomes[0].status, "pending");
     assert.equal((await store.getRelay("rc-pending")).status, "submitted");
+  });
+
+  it("does not orphan a confirmed job when the receipt RPC throws", async () => {
+    const store = new MemoryStore();
+    await enqueue(store, "rc-rpc");
+    await store.finishRelay("rc-rpc", "confirmed", TX_HASH, { to: HUB, data: "0x" });
+    const outcomes = await reconcileSubmitted(store, {
+      async getTransactionReceipt() {
+        throw new Error("rpc-503");
+      },
+    }, []);
+    assert.equal(outcomes[0].status, "pending");
+    assert.equal(outcomes[0].reason, "rpc-unavailable");
+    assert.equal((await store.getRelay("rc-rpc")).status, "confirmed", "RPC failure is not proof of disappearance");
+  });
+
+  it("keeps a reverted receipt recoverable until finality", async () => {
+    const store = new MemoryStore();
+    await enqueue(store, "rc-rev");
+    await store.finishRelay("rc-rev", "submitted", TX_HASH, { to: HUB, data: "0x" });
+    // Above the finalized head -> not yet terminal.
+    const tentative = await reconcileSubmitted(store, {
+      async getTransactionReceipt() {
+        return { status: false, blockNumber: 10n };
+      },
+      async getBlockByTag() {
+        return { number: 5n };
+      },
+    }, []);
+    assert.equal(tentative[0].status, "pending");
+    assert.equal((await store.getRelay("rc-rev")).status, "submitted");
+    // At/below the finalized head -> terminal.
+    const terminal = await reconcileSubmitted(store, {
+      async getTransactionReceipt() {
+        return { status: false, blockNumber: 4n };
+      },
+      async getBlockByTag() {
+        return { number: 5n };
+      },
+    }, []);
+    assert.equal(terminal[0].status, "reverted");
+    assert.equal((await store.getRelay("rc-rev")).status, "reverted");
   });
 });
 

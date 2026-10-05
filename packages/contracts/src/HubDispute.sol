@@ -230,6 +230,24 @@ library HubDispute {
         if (pol.outageSaturated()) return (original, false);
         if (anchor < pol.prunedBefore()) return (original, false);
 
+        // History completeness (coverage watermark). The retained ledger only
+        // proves anything once it is audited up to the feed head: every
+        // transition (down->up) since deployment must have been consumed by
+        // reportOutage. An up head requires the watermark to equal it; a down
+        // head is the ongoing outage, covered by live trailing, and requires
+        // only its predecessor to be audited. Any gap => UNKNOWN, never a
+        // shorter deadline.
+        {
+            FeedStatus memory fs = readFeed(pol);
+            if (!fs.ok) return (original, false);
+            uint80 la = pol.lastAuditedRound();
+            if (fs.up) {
+                if (la != fs.roundId) return (original, false);
+            } else if (la + 1 < fs.roundId) {
+                return (original, false);
+            }
+        }
+
         uint256 n = pol.outageCount();
         uint64[] memory starts = new uint64[](n);
         uint64[] memory ends = new uint64[](n);

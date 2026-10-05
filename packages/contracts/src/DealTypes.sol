@@ -226,6 +226,10 @@ library MidmanDK {
     uint32 internal constant DELIVERY_MAX_SECONDS = 2_592_000;
     uint32 internal constant INSPECTION_MAX_SECONDS = 1_209_600;
     uint64 internal constant READINESS_MAX_AGE_SECONDS = 7_200;
+    // P-11: readiness is REQUIRED iff the pricing tier is <= 3h
+    // (deliveryPeriodSeconds + inspectionPeriodSeconds <= 10,800); otherwise the
+    // signed readiness policy must be a registered no-readiness policy.
+    uint32 internal constant READINESS_TIER_MAX_SECONDS = 10_800;
     uint256 internal constant UNPAUSE_DELAY = 24 hours;
     uint8 internal constant VETO_QUORUM = 2;
 

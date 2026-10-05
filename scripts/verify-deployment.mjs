@@ -325,10 +325,12 @@ export async function verifyDeployment(manifest, options = {}) {
   if (!client) throw new Error('verifyDeployment: options.client is required');
 
   const checks = [];
-  const add = (id, status, detail = '') => checks.push({ id, status, detail });
+  // `advisory` unresolved checks (optional manifest pins) do not block release;
+  // REQUIRED unresolved checks (code presence/hashes/link) DO.
+  const add = (id, status, detail = '', advisory = false) => checks.push({ id, status, detail, advisory });
   const ok = (id, detail) => add(id, 'pass', detail);
   const bad = (id, detail) => add(id, 'fail', detail);
-  const skip = (id, detail) => add(id, 'unresolved', detail);
+  const skip = (id, detail, advisory = true) => add(id, 'unresolved', detail, advisory);
 
   const contracts = (manifest && manifest.contracts) || {};
   const roles = (manifest && manifest.roles) || {};
@@ -387,7 +389,7 @@ export async function verifyDeployment(manifest, options = {}) {
       );
     }
   } else {
-    skip('code.disputeLibrary', `disputeLibrary is not a pinned address: ${disputeLibrary}`);
+    skip('code.disputeLibrary', `disputeLibrary is not a pinned address: ${disputeLibrary}`, false);
   }
 
   const bytecodeHashes = (manifest && manifest.bytecodeHashes) || {};
@@ -399,7 +401,8 @@ export async function verifyDeployment(manifest, options = {}) {
   ]) {
     const pinned = bytecodeHashes[name];
     if (isPlaceholder(pinned)) {
-      skip(`codeHash.${name}`, 'manifest bytecode hash is a placeholder');
+      // A release manifest MUST pin every deployed bytecode hash.
+      skip(`codeHash.${name}`, 'manifest bytecode hash is a placeholder', false);
       continue;
     }
     if (!HASH_RE.test(typeof pinned === 'string' ? pinned : '')) {
@@ -413,14 +416,10 @@ export async function verifyDeployment(manifest, options = {}) {
     const actual = viem.keccak256(code);
     if (eqHex(actual, pinned)) {
       add(`codeHash.${name}`, 'pass', actual);
-    } else if (name === 'MidmanHub' && hubIsLinked) {
-      // The manifest hash is computed from the *pre-link* artifact (library
-      // placeholders zeroed), while live hub bytecode has the library address
-      // substituted at each link reference. The pinned hash is therefore
-      // advisory for a linked hub; the link check below is authoritative.
-      skip(`codeHash.${name}`, `advisory: pre-link artifact hash differs from linked hub code (actual=${actual})`);
     } else {
-      bad(`codeHash.${name}`, actual);
+      // A linked-hub bytecode mismatch is a FAILURE, not an unresolved
+      // advisory: the manifest must pin the deployed (linked) runtime hash.
+      bad(`codeHash.${name}`, `expected ${pinned} got ${actual}`);
     }
   }
 
@@ -434,9 +433,9 @@ export async function verifyDeployment(manifest, options = {}) {
       `hub code ${hubCode.toLowerCase().includes(needle) ? 'contains' : 'does not embed'} disputeLibrary ${disputeLibrary}`,
     );
   } else if (!isCode(hubCode)) {
-    skip('link.hub', 'hub code unavailable');
+    skip('link.hub', 'hub code unavailable', false);
   } else {
-    skip('link.hub', 'disputeLibrary is not a pinned address');
+    skip('link.hub', 'disputeLibrary is not a pinned address', false);
   }
 
   // (b) hub immutables + EIP-712 domain.
@@ -565,6 +564,41 @@ export async function verifyDeployment(manifest, options = {}) {
       } catch (error) {
         bad(`policy.${policyType}`, errMessage(error));
       }
+    }
+
+    // (c2) Approved category matrix + readiness-required variant. A release
+    // MUST instantiate every approved category minimum, not just one.
+    const CATEGORY_MATRIX = [
+      ['INSTANT_CODE', 3_600n],
+      ['GAME_ITEM', 43_200n],
+      ['GAME_CURRENCY', 43_200n],
+      ['DIGITAL_GOOD', 43_200n],
+      ['SERVICE', 43_200n],
+      ['GAME_ACCOUNT', 86_400n],
+    ];
+    for (const [name, expectedMin] of CATEGORY_MATRIX) {
+      const id = viem.keccak256(viem.stringToHex(`MIDMAN.CATEGORY.${name}.v1`));
+      try {
+        const res = await read(client, policies, POLICIES_ABI, 'categoryPolicies', [id]);
+        const exists = res && res[0] === true;
+        const onchainMin = BigInt((res && res[2]) ?? 0);
+        add(
+          `category.matrix.${name}`,
+          exists && onchainMin === expectedMin ? 'pass' : 'fail',
+          `onchain=${onchainMin} expected=${expectedMin}`,
+        );
+      } catch (error) {
+        bad(`category.matrix.${name}`, errMessage(error));
+      }
+    }
+    try {
+      const readinessId = viem.keccak256(viem.stringToHex('MIDMAN.READINESS.REQUIRED.v1'));
+      const res = await read(client, policies, POLICIES_ABI, 'readinessPolicies', [readinessId]);
+      const exists = res && res[0] === true;
+      const required = res && res[2] === true;
+      add('readiness.required', exists && required ? 'pass' : 'fail', `exists=${exists} required=${required}`);
+    } catch (error) {
+      bad('readiness.required', errMessage(error));
     }
 
     // (e) reviewer panels at the declared epoch.
@@ -753,12 +787,19 @@ export async function verifyDeployment(manifest, options = {}) {
 
   const failures = checks.filter((check) => check.status === 'fail').length;
   const unresolved = checks.filter((check) => check.status === 'unresolved').length;
+  // REQUIRED unresolved checks (bytecode/link pins, not optional manifest
+  // fields) block the PASS verdict: a release must not go green with an
+  // unpinned/unverified runtime.
+  const requiredUnresolved = checks.filter(
+    (check) => check.status === 'unresolved' && check.advisory !== true,
+  ).length;
   return {
     manifestPath: options.manifestPath,
     chainId,
-    ok: failures === 0,
+    ok: failures === 0 && requiredUnresolved === 0,
     failures,
     unresolved,
+    requiredUnresolved,
     checks,
   };
 }
@@ -775,7 +816,8 @@ export function formatTable(result) {
     if (index === 0) lines.push(widths.map((width) => '-'.repeat(width)).join('  '));
   });
   const header = `manifest: ${result.manifestPath || '(inline)'}`;
-  const summary = `checks: ${result.checks.length}   failed: ${result.failures}   unresolved: ${result.unresolved}`;
+  const required = result.requiredUnresolved ?? 0;
+  const summary = `checks: ${result.checks.length}   failed: ${result.failures}   unresolved: ${result.unresolved}   required-unresolved: ${required}`;
   const verdict = result.ok ? 'DEPLOYMENT: PASS' : 'DEPLOYMENT: FAIL';
   return `${header}\n${summary}\n\n${lines.join('\n')}\n\n${verdict}`;
 }

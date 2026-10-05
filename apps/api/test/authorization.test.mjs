@@ -35,6 +35,7 @@ import {
   registerCommitmentRoutes,
 } from "../dist/categories/routes.js";
 import { registerReviewRoutes } from "../dist/review/routes.js";
+import { registerDealMetaRoutes } from "../dist/dealsMeta.js";
 import {
   assignReviewers,
   listAssignmentAudit,
@@ -156,6 +157,7 @@ function makeApp({ indexer = null, reader = null } = {}) {
   registerMessageRoutes(app, deps);
   registerCommitmentRoutes(app, deps);
   registerReviewRoutes(app, deps);
+  registerDealMetaRoutes(app);
   registerAuthRoutes(app, deps);
   return { app, store, deps };
 }
@@ -195,6 +197,8 @@ describe("route-permission register coverage", () => {
     assert.equal(ROUTE_PERMISSIONS["GET /drafts/:id/terms"].access, "creator-or-party");
     assert.equal(ROUTE_PERMISSIONS["POST /review/cases/:dealId/assign"].access, "assignment");
     assert.ok(ROUTE_PERMISSIONS["POST /indexer/tick"].roles.includes("relay"));
+    // A8: the deployment-defaults read must be PUBLIC, not fail-closed 401.
+    assert.equal(ROUTE_PERMISSIONS["GET /config/deal-defaults"].access, "public");
     await app.close();
   });
 

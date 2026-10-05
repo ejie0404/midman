@@ -228,8 +228,30 @@ export function metadataFromRequest(
   };
 }
 
+export interface VerifySignedRequestOptions {
+  /**
+   * Require the metadata-bound format (x-request-nonce + x-request-action) and
+   * reject the legacy content/4-line forms. Used for evidence MUTATIONS so a
+   * replayed signature or a swapped multipart body cannot authorize.
+   */
+  readonly requireMetadata?: boolean;
+  /**
+   * Values parsed from the actual request that the SIGNED metadata must equal
+   * (multipart filename/mime/size and the recomputed content hash).
+   */
+  readonly expected?: {
+    readonly filename?: string;
+    readonly mime?: string;
+    readonly size?: string;
+    readonly fileHash?: string;
+  };
+}
+
 /** Verify signed-request headers; resolves the authorized wallet or throws 401. */
-export async function verifySignedRequest(req: FastifyRequest): Promise<Address> {
+export async function verifySignedRequest(
+  req: FastifyRequest,
+  opts: VerifySignedRequestOptions = {},
+): Promise<Address> {
   const wallet = headerValue(req, "x-wallet-address");
   const expiryRaw = headerValue(req, "x-wallet-expiry");
   const signature = headerValue(req, "x-wallet-signature");
@@ -260,12 +282,19 @@ export async function verifySignedRequest(req: FastifyRequest): Promise<Address>
       throw httpError(401, "Missing or invalid x-request-nonce");
     }
     candidates.push({ kind: "meta", message: buildMetadataSignedMessage(meta) });
+  } else if (opts.requireMetadata) {
+    throw httpError(
+      401,
+      "Metadata-bound signature required (x-request-nonce + x-request-action)",
+    );
   }
-  candidates.push({ kind: "content", message: buildSignedMessage(method, path, bodyHash, contentSha, expiryRaw) });
-  // Backward compatibility: no content header -> also accept the legacy
-  // 4-line message so pre-binding clients are not locked out.
-  if (contentSha === "") {
-    candidates.push({ kind: "legacy", message: buildLegacySignedMessage(method, path, bodyHash, expiryRaw) });
+  if (!opts.requireMetadata) {
+    candidates.push({ kind: "content", message: buildSignedMessage(method, path, bodyHash, contentSha, expiryRaw) });
+    // Backward compatibility: no content header -> also accept the legacy
+    // 4-line message so pre-binding clients are not locked out.
+    if (contentSha === "") {
+      candidates.push({ kind: "legacy", message: buildLegacySignedMessage(method, path, bodyHash, expiryRaw) });
+    }
   }
 
   let matched: { kind: "meta" | "content" | "legacy"; message: string } | null = null;
@@ -293,6 +322,22 @@ export async function verifySignedRequest(req: FastifyRequest): Promise<Address>
     const actualFile = params.fileHash ?? "";
     if (actualFile !== "" && meta.fileHash !== "" && meta.fileHash.toLowerCase() !== actualFile.toLowerCase()) {
       throw httpError(401, "Signed request file does not match the request target");
+    }
+    // Bind the SIGNED metadata to the ACTUAL parsed request values so a
+    // signature cannot be replayed against a different filename/mime/size/bytes.
+    if (opts.expected) {
+      const fail = (label: string): never => {
+        throw httpError(401, `Signed request ${label} does not match the uploaded value`);
+      };
+      if (opts.expected.filename !== undefined && meta.filename !== opts.expected.filename) fail("filename");
+      if (opts.expected.mime !== undefined && meta.mime !== opts.expected.mime) fail("mime");
+      if (opts.expected.size !== undefined && meta.size !== String(opts.expected.size)) fail("size");
+      if (
+        opts.expected.fileHash !== undefined &&
+        meta.fileHash.toLowerCase() !== opts.expected.fileHash.toLowerCase()
+      ) {
+        fail("file hash");
+      }
     }
     const consumed = await getSharedRegistry().consumeAuthNonce({
       nonce: meta.nonce,

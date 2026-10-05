@@ -20,6 +20,7 @@ import { configureRegistry as configureCategoryRegistry } from "./categories/reg
 import { configureRegistry as configureReviewRegistry } from "./review/registry.js";
 import { configureRegistry as configureApprovals } from "./review/approvals.js";
 import { configureRegistry as configureProposals } from "./review/proposals.js";
+import { configureRegistry as configureAwards } from "./review/awards.js";
 
 export interface ServerOptions {
   /**
@@ -54,6 +55,7 @@ export async function configureDurableRegistries(store: Store): Promise<boolean>
     configureReviewRegistry(adapter, dealIds),
     configureApprovals(adapter, dealIds),
     configureProposals(adapter, dealIds),
+    configureAwards(adapter, dealIds),
   ]);
   return true;
 }

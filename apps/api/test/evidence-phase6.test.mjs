@@ -241,9 +241,9 @@ async function uploadWithHeaders(app, dealId, headers, { bytes, filename = "note
 }
 
 async function uploadContentBound(app, dealId, account, opts) {
-  const { bytes, contentSha = sha256hex(bytes), ...rest } = opts;
-  const url = `/deals/${dealId}/evidence`;
-  return uploadWithHeaders(app, dealId, await contentHeaders(account, "POST", url, contentSha), { bytes, ...rest });
+  // Uploads now REQUIRE the metadata-bound format; this helper signs the file's
+  // real content hash (any caller-supplied `contentSha` is ignored).
+  return uploadMetadataBound(app, dealId, account, opts);
 }
 
 async function uploadMetadataBound(app, dealId, account, opts) {
@@ -276,34 +276,42 @@ function dealIdOf(seed) {
 
 // ---------------------------------------------------------------------------
 
-describe("Phase 6 · content-bound upload signing", () => {
-  it("requires x-content-sha256 for uploads when EVIDENCE_REQUIRE_CONTENT_BINDING=1", async () => {
-    process.env["EVIDENCE_REQUIRE_CONTENT_BINDING"] = "1";
+describe("Phase 6 · upload signing requires metadata binding", () => {
+  it("rejects a legacy 4-line signature for an upload", async () => {
     const { app, store } = await makeApp();
     const dealId = dealIdOf("31");
     await seedDeal(store, dealId);
     const bytes = Buffer.from("no content header bytes", "utf8");
     const url = `/deals/${dealId}/evidence`;
     const res = await uploadWithHeaders(app, dealId, await legacyHeaders(buyer, "POST", url), { bytes });
-    assert.equal(res.statusCode, 400);
-    assert.match(res.json().error, /x-content-sha256 is required/);
+    assert.equal(res.statusCode, 401);
+    assert.match(res.json().error, /Metadata-bound signature required/);
   });
 
-  it("rejects an upload whose declared content hash does not match the bytes", async () => {
+  it("rejects an upload whose signed file hash does not match the bytes", async () => {
     const { app, store } = await makeApp();
     const dealId = dealIdOf("32");
     await seedDeal(store, dealId);
     const bytes = Buffer.from("the actual bytes", "utf8");
-    const res = await uploadContentBound(app, dealId, buyer, { bytes, contentSha: sha256hex(Buffer.from("other bytes", "utf8")) });
-    assert.equal(res.statusCode, 400);
-    assert.match(res.json().error, /does not match/);
+    const url = `/deals/${dealId}/evidence`;
+    const { headers } = await metaHeaders(buyer, "POST", url, {
+      dealId,
+      action: "evidence.upload",
+      fileHash: sha256hex(Buffer.from("other bytes", "utf8")),
+      filename: "note.txt",
+      mime: "text/plain",
+      size: bytes.length,
+    });
+    const res = await uploadWithHeaders(app, dealId, headers, { bytes });
+    assert.equal(res.statusCode, 401);
+    assert.match(res.json().error, /file hash/i);
   });
 
-  it("accepts the 5-line content-bound signature and stores the exact file hash", async () => {
+  it("accepts the metadata-bound signature and stores the exact file hash", async () => {
     const { app, store } = await makeApp();
     const dealId = dealIdOf("33");
     await seedDeal(store, dealId);
-    const bytes = Buffer.from("content bound delivery document", "utf8");
+    const bytes = Buffer.from("metadata bound delivery document", "utf8");
     const res = await uploadContentBound(app, dealId, buyer, { bytes });
     assert.equal(res.statusCode, 200, JSON.stringify(res.json()));
     assert.equal(res.json().fileHash, `0x${sha256hex(bytes)}`);
@@ -337,11 +345,12 @@ describe("Phase 6 · metadata-bound authorization + replay protection", () => {
       size: bytes.length,
       contentSha: cs,
     });
-    const first = await uploadWithHeaders(app, dealId, headers, { bytes });
+    const first = await uploadWithHeaders(app, dealId, headers, { bytes, filename: "r.txt" });
     assert.equal(first.statusCode, 200, JSON.stringify(first.json()));
     // Same signature + nonce, different description -> replay must be refused.
     const replay = await uploadWithHeaders(app, dealId, headers, {
       bytes: Buffer.from("replay me once only", "utf8"),
+      filename: "r.txt",
       description: "second",
     });
     assert.equal(replay.statusCode, 401);
@@ -400,8 +409,9 @@ describe("Phase 6 · atomic upload finalization", () => {
     const dealId = dealIdOf("3a");
     await seedDeal(store, dealId);
     const bytes = Buffer.from("rejected upload bytes", "utf8");
-    const bad = await uploadContentBound(app, dealId, buyer, { bytes, contentSha: sha256hex(Buffer.from("nope", "utf8")) });
-    assert.equal(bad.statusCode, 400);
+    const url = `/deals/${dealId}/evidence`;
+    const bad = await uploadWithHeaders(app, dealId, await legacyHeaders(buyer, "POST", url), { bytes });
+    assert.equal(bad.statusCode, 401);
     assert.equal(getSharedRegistry().getManifest(dealId).length, 0);
   });
 });
