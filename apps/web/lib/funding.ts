@@ -20,6 +20,8 @@
 // in tests (no enums, namespaces, or parameter properties).
 
 import { encodeFunctionData, type Address, type Hash, type TransactionReceipt } from "viem";
+import { ABSENT_SIGNATURE } from "@midman/api-client";
+import type { RelayFundPayload as CanonicalRelayFundPayload } from "@midman/api-client";
 import { DEAL_TERMS_FIELDS, EIP712_DOMAIN, HUB_ABI, TYPES } from "@midman/chain";
 import {
   getFundingBundleRaw,
@@ -157,6 +159,48 @@ export interface ReadinessStruct {
   readonly signature: string;
 }
 
+// ---- Bundle types (canonical API contract, no aliases) ----
+//
+// Field names mirror the wire shapes in @midman/api-client/src/funding.ts
+// exactly. Transport uints arrive as decimal strings and are normalized to
+// bigint here for signing/encoding; assembleRelayPayload() converts back to
+// decimal strings for POST. The bundle carries signing PARAMS plus typed-data
+// envelopes — never wallet signatures (those travel as explicit arguments).
+
+export interface TypedDataEnvelopeWire {
+  readonly domain: {
+    readonly name: string;
+    readonly version: string;
+    readonly chainId: number;
+    readonly verifyingContract: Address;
+  };
+  readonly types: Record<string, readonly { readonly name: string; readonly type: string }[]>;
+  readonly primaryType: string;
+  readonly message: Record<string, unknown>;
+}
+
+export interface BundleAllowanceParams {
+  readonly paymentSalt: Hash;
+  readonly nonce: Hash;
+  readonly expiresAt: bigint;
+  readonly typedData: TypedDataEnvelopeWire;
+}
+
+export interface BundleReadinessParams {
+  readonly required: boolean | null;
+  readonly note: string;
+  readonly attestedAt: bigint;
+  readonly nonce: Hash;
+  readonly expiresAt: bigint;
+  readonly typedData: TypedDataEnvelopeWire | null;
+}
+
+export interface BundleAdmission {
+  readonly note: string;
+  /** Operator-granted admission struct, or null until the operator grants it. */
+  readonly granted: AdmissionStruct | null;
+}
+
 export interface FundingBundle {
   readonly draftId: string;
   readonly dealId: Hash;
@@ -164,19 +208,17 @@ export interface FundingBundle {
   readonly chainId: number;
   readonly hub: Address;
   readonly token: Address;
+  readonly principalUnits: string;
   readonly fundedUnits: string;
   readonly prepaidBuyerFeeUnits: string;
-  readonly principalUnits: string;
-  readonly requiresReadiness: boolean;
   readonly dealTermsTypedData: DealTermsTypedData;
   readonly fullTerms: Record<string, unknown>;
   readonly signatures: { readonly buyer: string | null; readonly seller: string | null };
-  readonly pay: PaymentStruct | null;
-  readonly allowance: AllowanceStruct | null;
-  readonly admission: AdmissionStruct | null;
-  readonly readiness: ReadinessStruct | null;
-  readonly fundCalldataTemplate: string | null;
-  readonly admissionNote: string | null;
+  readonly allowance: BundleAllowanceParams;
+  readonly readiness: BundleReadinessParams;
+  readonly admission: BundleAdmission;
+  readonly requiredSignatures: readonly ["buyer", "seller"];
+  readonly relayActionTemplate: { readonly action: "fund"; readonly params: { readonly dealId: Hash } };
 }
 
 // ---- Defensive parsing helpers ----
@@ -266,53 +308,6 @@ export function normalizeDealTerms(raw: Record<string, unknown>): Record<string,
   return normalizeStruct(raw, DEAL_TERMS_FIELDS, "fullTerms");
 }
 
-function parsePayment(raw: unknown): PaymentStruct | null {
-  if (raw === undefined || raw === null) return null;
-  const obj = asRecord(raw, "pay");
-  return {
-    validAfter: toBigIntValue(obj["validAfter"] ?? 0, "pay.validAfter"),
-    validBefore: toBigIntValue(obj["validBefore"] ?? 0, "pay.validBefore"),
-    paymentSalt: asHash(obj["paymentSalt"] ?? ZERO_HASH, "pay.paymentSalt"),
-    v: Number(toBigIntValue(obj["v"] ?? 0, "pay.v")),
-    r: asHash(obj["r"] ?? ZERO_HASH, "pay.r"),
-    s: asHash(obj["s"] ?? ZERO_HASH, "pay.s"),
-    use3009: obj["use3009"] === true || obj["use3009"] === "true",
-  };
-}
-
-function parseAllowance(raw: unknown): AllowanceStruct | null {
-  if (raw === undefined || raw === null) return null;
-  const obj = asRecord(raw, "allowance");
-  return {
-    paymentSalt: asHash(obj["paymentSalt"] ?? ZERO_HASH, "allowance.paymentSalt"),
-    nonce: asHash(obj["nonce"] ?? ZERO_HASH, "allowance.nonce"),
-    expiresAt: toBigIntValue(obj["expiresAt"] ?? 0, "allowance.expiresAt"),
-    signature: typeof obj["signature"] === "string" ? obj["signature"] : "",
-  };
-}
-
-function parseAdmission(raw: unknown): AdmissionStruct | null {
-  if (raw === undefined || raw === null) return null;
-  const obj = asRecord(raw, "admission");
-  return {
-    minPolicyId: asHash(obj["minPolicyId"] ?? ZERO_HASH, "admission.minPolicyId"),
-    admissionNonce: asHash(obj["admissionNonce"] ?? ZERO_HASH, "admission.admissionNonce"),
-    expiresAt: toBigIntValue(obj["expiresAt"] ?? 0, "admission.expiresAt"),
-    signature: typeof obj["signature"] === "string" ? obj["signature"] : "",
-  };
-}
-
-function parseReadiness(raw: unknown): ReadinessStruct | null {
-  if (raw === undefined || raw === null) return null;
-  const obj = asRecord(raw, "readiness");
-  return {
-    attestedAt: toBigIntValue(obj["attestedAt"] ?? 0, "readiness.attestedAt"),
-    nonce: asHash(obj["nonce"] ?? ZERO_HASH, "readiness.nonce"),
-    expiresAt: toBigIntValue(obj["expiresAt"] ?? 0, "readiness.expiresAt"),
-    signature: typeof obj["signature"] === "string" ? obj["signature"] : "",
-  };
-}
-
 function parseDealTermsTypedData(
   raw: unknown,
   fallback: { chainId: number; hub: Address; message: Record<string, unknown> },
@@ -375,31 +370,79 @@ export function assertCanonicalDealTermsTypedData(typedData: DealTermsTypedData)
   }
 }
 
-/** Parse + validate a raw funding-bundle response into a typed FundingBundle. */
+function sigOrNull(value: unknown): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]+$/.test(value))
+    throw new Error("Funding bundle: signature must be hex or null");
+  return value;
+}
+
+function parseEnvelope(raw: unknown, field: string): TypedDataEnvelopeWire {
+  const obj = asRecord(raw, field);
+  const domain = asRecord(obj["domain"], `${field}.domain`);
+  const typesRaw = asRecord(obj["types"], `${field}.types`);
+  const types: Record<string, readonly { readonly name: string; readonly type: string }[]> = {};
+  for (const [key, value] of Object.entries(typesRaw)) {
+    if (!Array.isArray(value)) throw new Error(`Funding bundle: ${field}.types.${key} must be an array`);
+    types[key] = value as readonly { readonly name: string; readonly type: string }[];
+  }
+  return {
+    domain: {
+      name: asString(domain["name"], `${field}.domain.name`),
+      version: asString(domain["version"], `${field}.domain.version`),
+      chainId: Number(toBigIntValue(domain["chainId"], `${field}.domain.chainId`)),
+      verifyingContract: asAddress(domain["verifyingContract"], `${field}.domain.verifyingContract`),
+    },
+    types,
+    primaryType: asString(obj["primaryType"], `${field}.primaryType`),
+    message: asRecord(obj["message"], `${field}.message`),
+  };
+}
+
+/** Strict operator-granted admission: complete struct or null (never partial). */
+function parseGrantedAdmission(raw: unknown): AdmissionStruct | null {
+  if (raw === undefined || raw === null) return null;
+  const obj = asRecord(raw, "admission.granted");
+  return {
+    minPolicyId: asHash(required(obj, ["minPolicyId"], "minPolicyId"), "admission.granted.minPolicyId"),
+    admissionNonce: asHash(required(obj, ["admissionNonce"], "admissionNonce"), "admission.granted.admissionNonce"),
+    expiresAt: toBigIntValue(required(obj, ["expiresAt"], "expiresAt"), "admission.granted.expiresAt"),
+    signature: asString(required(obj, ["signature"], "signature"), "admission.granted.signature"),
+  };
+}
+
+/**
+ * Parse + validate a raw funding-bundle response into a typed FundingBundle.
+ * Keys are the exact canonical contract (@midman/api-client/src/funding.ts):
+ * unknown aliases are rejected so API/web drift fails loudly instead of
+ * producing null-filled bundles.
+ */
 export function parseFundingBundle(raw: unknown, draftId = ""): FundingBundle {
   const outer = asRecord(raw, "bundle");
   const data = isRecord(outer["bundle"]) ? asRecord(outer["bundle"], "bundle.bundle") : outer;
 
   const dealId = asHash(required(data, ["dealId"], "dealId"), "dealId");
   const chainId = Number(toBigIntValue(required(data, ["chainId"], "chainId"), "chainId"));
-  const hub = asAddress(required(data, ["hub", "verifyingContract"], "hub"), "hub");
-  const token = asAddress(required(data, ["token", "usdc", "paymentToken"], "token"), "token");
-  const fundedUnits = asUnits(required(data, ["fundedUnits", "fundedAmount", "totalUnits"], "fundedUnits"), "fundedUnits");
+  const hub = asAddress(required(data, ["hub"], "hub"), "hub");
+  const token = asAddress(required(data, ["token"], "token"), "token");
+  const principalUnits = asUnits(required(data, ["principalUnits"], "principalUnits"), "principalUnits");
+  const fundedUnits = asUnits(required(data, ["fundedUnits"], "fundedUnits"), "fundedUnits");
   const prepaidBuyerFeeUnits = asUnits(
-    pickValue(data, ["prepaidBuyerFeeUnits", "prepaidFeeUnits", "prepaidBuyerFee"]) ?? "0",
+    required(data, ["prepaidBuyerFeeUnits"], "prepaidBuyerFeeUnits"),
     "prepaidBuyerFeeUnits",
   );
-  const principalUnits = asUnits(pickValue(data, ["principalUnits", "principal"]) ?? "0", "principalUnits");
 
-  const agreementRaw = pickValue(data, ["agreementDigest", "agreementHash"]);
-  const agreementDigest = agreementRaw === undefined ? null : asHash(agreementRaw, "agreementDigest");
+  const agreementRaw = data["agreementDigest"];
+  const agreementDigest =
+    agreementRaw === undefined || agreementRaw === null ? null : asHash(agreementRaw, "agreementDigest");
 
-  const fullTermsRaw = asRecord(required(data, ["fullTerms", "terms", "dealTermsStruct", "canonicalTerms"], "fullTerms"), "fullTerms");
-  const fullTermsNested = isRecord(fullTermsRaw["message"]) ? asRecord(fullTermsRaw["message"], "fullTerms.message") : fullTermsRaw;
-  const fullTerms = normalizeDealTerms(fullTermsNested);
+  const fullTermsRaw = asRecord(required(data, ["fullTerms"], "fullTerms"), "fullTerms");
+  const fullTerms = normalizeDealTerms(fullTermsRaw);
 
-  const typedRaw = pickValue(data, ["dealTermsTypedData", "typedData", "dealTerms"]);
-  const typedDeclared = parseDealTermsTypedData(typedRaw, { chainId, hub, message: fullTermsNested });
+  const typedDeclared = parseDealTermsTypedData(
+    required(data, ["dealTermsTypedData"], "dealTermsTypedData"),
+    { chainId, hub, message: fullTermsRaw },
+  );
   assertCanonicalDealTermsTypedData(typedDeclared);
   const dealTermsTypedData: DealTermsTypedData = {
     domain: typedDeclared.domain,
@@ -408,40 +451,73 @@ export function parseFundingBundle(raw: unknown, draftId = ""): FundingBundle {
     message: normalizeTypedDataMessage(typedDeclared.message),
   };
 
-  const sigsRaw = isRecord(data["signatures"]) ? data["signatures"] : isRecord(data["sigs"]) ? data["sigs"] : {};
-  const signatures = {
-    buyer: typeof sigsRaw["buyer"] === "string" && sigsRaw["buyer"] !== "" ? (sigsRaw["buyer"] as string) : null,
-    seller: typeof sigsRaw["seller"] === "string" && sigsRaw["seller"] !== "" ? (sigsRaw["seller"] as string) : null,
+  const sigs = asRecord(required(data, ["signatures"], "signatures"), "signatures");
+
+  const allowanceRaw = asRecord(required(data, ["allowance"], "allowance"), "allowance");
+  const allowance: BundleAllowanceParams = {
+    paymentSalt: asHash(required(allowanceRaw, ["paymentSalt"], "paymentSalt"), "allowance.paymentSalt"),
+    nonce: asHash(required(allowanceRaw, ["nonce"], "nonce"), "allowance.nonce"),
+    expiresAt: toBigIntValue(required(allowanceRaw, ["expiresAt"], "expiresAt"), "allowance.expiresAt"),
+    typedData: parseEnvelope(required(allowanceRaw, ["typedData"], "typedData"), "allowance.typedData"),
   };
 
-  const readinessFlag = pickValue(data, ["requiresReadiness", "readinessRequired", "requiresReadinessConsent"]);
-  const requiresReadiness = readinessFlag === true || readinessFlag === "true";
+  const readinessRaw = asRecord(required(data, ["readiness"], "readiness"), "readiness");
+  const requiredFlag = readinessRaw["required"];
+  if (requiredFlag !== true && requiredFlag !== false && requiredFlag !== null)
+    throw new Error("Funding bundle: readiness.required must be true, false, or null");
+  const readinessTypedRaw = readinessRaw["typedData"];
+  const readiness: BundleReadinessParams = {
+    required: requiredFlag,
+    note: asString(required(readinessRaw, ["note"], "note"), "readiness.note"),
+    attestedAt: toBigIntValue(required(readinessRaw, ["attestedAt"], "attestedAt"), "readiness.attestedAt"),
+    nonce: asHash(required(readinessRaw, ["nonce"], "nonce"), "readiness.nonce"),
+    expiresAt: toBigIntValue(required(readinessRaw, ["expiresAt"], "expiresAt"), "readiness.expiresAt"),
+    typedData:
+      readinessTypedRaw === undefined || readinessTypedRaw === null
+        ? null
+        : parseEnvelope(readinessTypedRaw, "readiness.typedData"),
+  };
 
-  const noteRaw = pickValue(data, ["admissionNote", "note", "admissionServiceNote"]);
+  const admissionRaw = asRecord(required(data, ["admission"], "admission"), "admission");
+  const admission: BundleAdmission = {
+    note: asString(required(admissionRaw, ["note"], "note"), "admission.note"),
+    granted: parseGrantedAdmission(admissionRaw["granted"]),
+  };
+
+  const requiredSigs = data["requiredSignatures"];
+  if (
+    !Array.isArray(requiredSigs) ||
+    requiredSigs.length !== 2 ||
+    requiredSigs[0] !== "buyer" ||
+    requiredSigs[1] !== "seller"
+  )
+    throw new Error('Funding bundle: requiredSignatures must be ["buyer", "seller"]');
+
+  const template = asRecord(required(data, ["relayActionTemplate"], "relayActionTemplate"), "relayActionTemplate");
+  if (template["action"] !== "fund") throw new Error('Funding bundle: relayActionTemplate.action must be "fund"');
+  const templateParams = asRecord(template["params"], "relayActionTemplate.params");
 
   return {
-    draftId: draftId || (typeof pickValue(data, ["draftId"]) === "string" ? (pickValue(data, ["draftId"]) as string) : ""),
+    draftId: draftId || (typeof data["draftId"] === "string" ? (data["draftId"] as string) : ""),
     dealId,
     agreementDigest,
     chainId,
     hub,
     token,
+    principalUnits,
     fundedUnits,
     prepaidBuyerFeeUnits,
-    principalUnits,
-    requiresReadiness,
     dealTermsTypedData,
     fullTerms,
-    signatures,
-    pay: parsePayment(pickValue(data, ["pay", "payment", "payment3009"])),
-    allowance: parseAllowance(pickValue(data, ["allowance", "allowanceIntent"])),
-    admission: parseAdmission(pickValue(data, ["admission"])),
-    readiness: parseReadiness(pickValue(data, ["readiness", "readinessAuth"])),
-    fundCalldataTemplate:
-      typeof pickValue(data, ["fundCalldataTemplate"]) === "string"
-        ? (pickValue(data, ["fundCalldataTemplate"]) as string)
-        : null,
-    admissionNote: typeof noteRaw === "string" ? noteRaw : null,
+    signatures: { buyer: sigOrNull(sigs["buyer"]), seller: sigOrNull(sigs["seller"]) },
+    allowance,
+    readiness,
+    admission,
+    requiredSignatures: ["buyer", "seller"],
+    relayActionTemplate: {
+      action: "fund",
+      params: { dealId: asHash(templateParams["dealId"], "relayActionTemplate.params.dealId") },
+    },
   };
 }
 
@@ -532,43 +608,75 @@ export async function signReadiness(
   });
 }
 
-/** Return a copy of the bundle with freshly produced inner signatures attached. */
-export function withFundingSignatures(
-  bundle: FundingBundle,
-  overrides: {
-    readonly allowanceSignature?: string;
-    readonly readinessSignature?: string;
-    readonly admissionSignature?: string;
-  },
-): FundingBundle {
-  const allowance =
-    bundle.allowance !== null && overrides.allowanceSignature !== undefined
-      ? { ...bundle.allowance, signature: overrides.allowanceSignature }
-      : bundle.allowance;
-  const readiness =
-    bundle.readiness !== null && overrides.readinessSignature !== undefined
-      ? { ...bundle.readiness, signature: overrides.readinessSignature }
-      : bundle.readiness;
-  const admission =
-    bundle.admission !== null && overrides.admissionSignature !== undefined
-      ? { ...bundle.admission, signature: overrides.admissionSignature }
-      : bundle.admission;
-  return { ...bundle, allowance, readiness, admission };
+// ---- Struct assembly (one path for relay + direct) ----
+
+export interface FundStructSignatures {
+  readonly buyer: string;
+  readonly seller: string;
+  /** Buyer FundWithAllowance signature (the allowance path is the only UI path). */
+  readonly allowance: string;
+  /** Buyer ReadinessConsent signature. Required iff bundle.readiness.required. */
+  readonly readiness?: string;
+  /** Operator admission signature. Defaults to the bundle's granted admission. */
+  readonly admission?: string;
+}
+
+export interface RelayStructs {
+  readonly pay: PaymentStruct;
+  readonly allowance: AllowanceStruct;
+  readonly admission: AdmissionStruct;
+  readonly readiness: ReadinessStruct;
+}
+
+function assertSig(value: string | undefined, field: string): string {
+  if (typeof value !== "string" || value === "" || value === "0x")
+    throw new Error(`Funding: ${field} signature is required`);
+  return value;
+}
+
+/**
+ * Assemble the four completed on-chain structs from bundle params plus
+ * wallet/operator signatures. Readiness without a signature is only allowed
+ * when the policy does not require consent (the hub ignores that slot);
+ * ABSENT_SIGNATURE marks the ignored slot explicitly.
+ */
+export function assembleStructs(bundle: FundingBundle, sigs: FundStructSignatures): RelayStructs {
+  const allowanceSig = assertSig(sigs.allowance, "allowance intent");
+  const granted = bundle.admission.granted;
+  if (!granted) throw new Error("Funding: operator-granted admission is missing");
+  const admissionSig = sigs.admission ?? granted.signature;
+  if (!admissionSig || admissionSig === "0x")
+    throw new Error("Funding: admission signature is missing");
+  let readiness: ReadinessStruct;
+  if (sigs.readiness) {
+    readiness = {
+      attestedAt: bundle.readiness.attestedAt,
+      nonce: bundle.readiness.nonce,
+      expiresAt: bundle.readiness.expiresAt,
+      signature: sigs.readiness,
+    };
+  } else if (bundle.readiness.required === false) {
+    readiness = { attestedAt: 0n, nonce: ZERO_HASH, expiresAt: 0n, signature: ABSENT_SIGNATURE };
+  } else {
+    throw new Error("Funding: readiness consent signature is required for this deal");
+  }
+  return {
+    pay: zeroPayment(),
+    allowance: {
+      paymentSalt: bundle.allowance.paymentSalt,
+      nonce: bundle.allowance.nonce,
+      expiresAt: bundle.allowance.expiresAt,
+      signature: allowanceSig,
+    },
+    admission: { ...granted, signature: admissionSig },
+    readiness,
+  };
 }
 
 // ---- Calldata ----
 
 function zeroPayment(): PaymentStruct {
   return { validAfter: 0n, validBefore: 0n, paymentSalt: ZERO_HASH, v: 0, r: ZERO_HASH, s: ZERO_HASH, use3009: false };
-}
-function zeroAllowance(): AllowanceStruct {
-  return { paymentSalt: ZERO_HASH, nonce: ZERO_HASH, expiresAt: 0n, signature: "0x" };
-}
-function zeroAdmission(): AdmissionStruct {
-  return { minPolicyId: ZERO_HASH, admissionNonce: ZERO_HASH, expiresAt: 0n, signature: "0x" };
-}
-function zeroReadiness(): ReadinessStruct {
-  return { attestedAt: 0n, nonce: ZERO_HASH, expiresAt: 0n, signature: "0x" };
 }
 
 /** ERC20 approve calldata for the exact funded amount. */
@@ -582,28 +690,23 @@ export function buildApproveCalldata(spender: Address, amountUnits: string): Has
 
 /**
  * Encode the full `fund(...)` call from the bundle's on-chain DealTerms plus
- * both party signatures. This is the only direct call the hub accepts for a
- * newly funded deal (finding #6: the web must not stop at approve()).
+ * all wallet/operator signatures. This is the only direct call the hub
+ * accepts for a newly funded deal (finding #6: the web must not stop at
+ * approve()). Byte-identical to what the API enqueues for the same inputs.
  */
-export function buildFundCalldata(
-  bundle: FundingBundle,
-  signatures: { readonly buyer: string; readonly seller: string },
-): Hash {
-  if (!signatures.buyer || signatures.buyer === "0x") {
-    throw new Error("Funding: buyer DealTerms signature is required to call fund()");
-  }
-  if (!signatures.seller || signatures.seller === "0x") {
-    throw new Error("Funding: seller DealTerms signature is required to call fund()");
-  }
+export function buildFundCalldata(bundle: FundingBundle, sigs: FundStructSignatures): Hash {
+  const buyer = assertSig(sigs.buyer, "buyer DealTerms");
+  const seller = assertSig(sigs.seller, "seller DealTerms");
+  const structs = assembleStructs(bundle, sigs);
   const terms = normalizeDealTerms(bundle.fullTerms);
   const args = [
     terms,
-    signatures.buyer as `0x${string}`,
-    signatures.seller as `0x${string}`,
-    bundle.pay ?? zeroPayment(),
-    bundle.allowance ?? zeroAllowance(),
-    bundle.admission ?? zeroAdmission(),
-    bundle.readiness ?? zeroReadiness(),
+    buyer as `0x${string}`,
+    seller as `0x${string}`,
+    structs.pay,
+    structs.allowance,
+    structs.admission,
+    structs.readiness,
   ];
   return encodeFunctionData({
     abi: HUB_ABI,
@@ -612,18 +715,7 @@ export function buildFundCalldata(
   } as unknown as Parameters<typeof encodeFunctionData>[0]) as Hash;
 }
 
-// ---- Sponsored relay path ----
-
-export interface RelayFundPayload {
-  readonly buyerSignature: string;
-  readonly sellerSignature: string;
-  readonly payer?: string;
-  readonly readinessSignature?: string;
-  readonly allowanceSignature?: string;
-  readonly admissionSignature?: string;
-  readonly idempotencyKey?: string;
-  readonly [key: string]: unknown;
-}
+// ---- Sponsored relay path (canonical API contract) ----
 
 export interface RelayFundResult {
   readonly idempotencyKey: string;
@@ -636,6 +728,58 @@ function newIdempotencyKey(prefix: string, seed: string): string {
   return `${prefix}-${seed.slice(0, 16)}-${Date.now()}-${rand}`;
 }
 
+function wireUnits(value: bigint): string {
+  return value.toString();
+}
+
+/**
+ * Assemble the exact POST /drafts/:id/relay-fund body (canonical contract):
+ * sigBuyer/sigSeller plus the four completed structs with decimal-string
+ * uints. Throws when a required signature is missing instead of posting a
+ * payload the API would reject.
+ */
+export function assembleRelayPayload(
+  bundle: FundingBundle,
+  sigs: FundStructSignatures,
+  idempotencyKey = newIdempotencyKey("fund", bundle.draftId),
+): CanonicalRelayFundPayload {
+  const buyer = assertSig(sigs.buyer, "buyer DealTerms");
+  const seller = assertSig(sigs.seller, "seller DealTerms");
+  const s = assembleStructs(bundle, sigs);
+  return {
+    idempotencyKey,
+    sigBuyer: buyer,
+    sigSeller: seller,
+    pay: {
+      validAfter: wireUnits(s.pay.validAfter),
+      validBefore: wireUnits(s.pay.validBefore),
+      paymentSalt: s.pay.paymentSalt,
+      v: String(s.pay.v),
+      r: s.pay.r,
+      s: s.pay.s,
+      use3009: s.pay.use3009,
+    },
+    allowance: {
+      paymentSalt: s.allowance.paymentSalt,
+      nonce: s.allowance.nonce,
+      expiresAt: wireUnits(s.allowance.expiresAt),
+      signature: s.allowance.signature,
+    },
+    admission: {
+      minPolicyId: s.admission.minPolicyId,
+      admissionNonce: s.admission.admissionNonce,
+      expiresAt: wireUnits(s.admission.expiresAt),
+      signature: s.admission.signature,
+    },
+    readiness: {
+      attestedAt: wireUnits(s.readiness.attestedAt),
+      nonce: s.readiness.nonce,
+      expiresAt: wireUnits(s.readiness.expiresAt),
+      signature: s.readiness.signature,
+    },
+  };
+}
+
 /**
  * Hand the funding bundle to the sponsored relayer. The idempotency key makes
  * retries safe: a repeated key never double-funds. A returned status is NOT
@@ -643,14 +787,13 @@ function newIdempotencyKey(prefix: string, seed: string): string {
  */
 export function submitRelayFund(
   draftId: string,
-  payload: RelayFundPayload,
+  payload: CanonicalRelayFundPayload,
   deps: FundingDeps = {},
 ): Promise<RelayFundResult> {
-  const idempotencyKey =
-    typeof payload.idempotencyKey === "string" && payload.idempotencyKey !== ""
-      ? payload.idempotencyKey
-      : newIdempotencyKey("fund", draftId);
-  const body: Record<string, unknown> = { ...payload, idempotencyKey };
+  const body: Record<string, unknown> = { ...payload };
+  if (typeof body["idempotencyKey"] !== "string" || body["idempotencyKey"] === "") {
+    body["idempotencyKey"] = newIdempotencyKey("fund", draftId);
+  }
   return apiPostRelayFund(draftId, body, deps.fetchImpl) as Promise<RelayFundResult>;
 }
 
@@ -707,8 +850,8 @@ export async function fetchFundingStatus(draftId: string, deps: FundingDeps = {}
 // ---- Direct path: ensureChain -> optional approve -> fund() -> assert event ----
 
 async function requiresApproval(bundle: FundingBundle, owner: Address, deps: FundingDeps): Promise<boolean> {
-  // EIP-3009 receiveWithAuthorization settles inside fund(): no ERC20 approve.
-  if (bundle.pay?.use3009 === true) return false;
+  // The UI only produces the allowance path (no EIP-3009 signing), so the
+  // buyer must approve the hub unless on-chain allowance already covers it.
   if (deps.allowanceSufficient === true) return false;
   if (deps.allowanceSufficient === false) return true;
   const client = deps.publicClient as PublicClientLike | undefined;
@@ -745,7 +888,7 @@ export interface DirectFundResult {
  */
 export async function directFund(
   bundle: FundingBundle,
-  signatures: { readonly buyer: string; readonly seller: string },
+  sigs: FundStructSignatures,
   deps: FundingDeps = {},
 ): Promise<DirectFundResult> {
   const wallet = walletOf(deps);
@@ -763,7 +906,7 @@ export async function directFund(
     approveTxHash = approveReceipt.transactionHash;
   }
 
-  const fundData = buildFundCalldata(bundle, signatures);
+  const fundData = buildFundCalldata(bundle, sigs);
   const receipt = await waitForReceipt(await wallet.sendTransaction({ account: payer, to: bundle.hub, data: fundData }), {
     publicClient,
   });

@@ -1,9 +1,12 @@
 // Funding bundle + deal-signature persistence (audit finding #6, API half).
 //
 // The bundle is everything a wallet needs to complete a fund() call for a
-// draft: the full 32-field DealTerms typed data both parties sign, the
-// buyer-signed FundWithAllowance allowance, the Payment3009 slot, plus the
-// admission/readiness envelopes and the relay template. Nothing here signs or
+// draft, in the canonical shape defined by @midman/api-client/src/funding.ts
+// (exact field names, no aliases): full 32-field DealTerms typed data both
+// parties sign, draft DealTerms signatures collected so far, the
+// buyer-signed FundWithAllowance params + envelope, readiness
+// requirement + params (+ envelope when required), and the
+// operator-granted admission struct when present. Nothing here signs or
 // submits; the contract remains the arbiter.
 //
 // Nonce/salt strategy: `paymentSalt` and `allowanceNonce` are uniformly random
@@ -48,24 +51,44 @@ export interface FundingDeps {
 
 export type DealRole = "buyer" | "seller";
 
+/**
+ * Canonical funding bundle — the single API/web contract defined in
+ * @midman/api-client/src/funding.ts. Field names are exact (no aliases):
+ * `token` (not usdc), `signatures` (draft DealTerms sigs), `allowance`
+ * (signing params + typed envelope), `readiness` (required flag + params +
+ * optional envelope), `admission` (policy note + operator-granted struct).
+ */
 export interface FundingBundle {
+  readonly draftId: string;
   readonly dealId: string;
   readonly hub: Address;
-  readonly usdc: Address;
+  readonly token: Address;
   readonly chainId: number;
-  readonly fullTerms: Record<string, string>;
-  readonly agreementDigest: Hash;
+  readonly principalUnits: string;
   readonly fundedUnits: string;
   readonly prepaidBuyerFeeUnits: string;
+  readonly fullTerms: Record<string, string>;
+  readonly agreementDigest: Hash;
   readonly dealTermsTypedData: ReturnType<typeof dealTermsTypedData>;
-  readonly allowanceTypedData: ReturnType<typeof fundWithAllowanceTypedData>;
-  readonly paymentSalt: Hash;
-  readonly allowanceNonce: Hash;
-  readonly allowanceExpiresAt: string;
-  readonly readinessRequired: boolean | null;
-  readonly readinessPolicyNote: string;
-  readonly readinessTypedData: ReturnType<typeof readinessConsentTypedData> | null;
-  readonly admissionPolicyNote: string;
+  readonly signatures: { readonly buyer: string | null; readonly seller: string | null };
+  readonly allowance: {
+    readonly paymentSalt: Hash;
+    readonly nonce: Hash;
+    readonly expiresAt: string;
+    readonly typedData: ReturnType<typeof fundWithAllowanceTypedData>;
+  };
+  readonly readiness: {
+    readonly required: boolean | null;
+    readonly note: string;
+    readonly attestedAt: string;
+    readonly nonce: Hash;
+    readonly expiresAt: string;
+    readonly typedData: ReturnType<typeof readinessConsentTypedData> | null;
+  };
+  readonly admission: {
+    readonly note: string;
+    readonly granted: Record<string, string> | null;
+  };
   readonly requiredSignatures: readonly ["buyer", "seller"];
   readonly relayActionTemplate: { readonly action: "fund"; readonly params: { readonly dealId: string } };
 }
@@ -164,6 +187,11 @@ export async function buildFundingBundle(
   });
 
   const { required: readinessRequired, note: readinessPolicyNote } = resolveReadiness(terms);
+  // Fresh attestation params are always issued so the buyer can sign a
+  // consent when the policy requires it; the typed envelope exists only then.
+  const readinessAttestedAt = String(nowSeconds);
+  const readinessNonce = randomHash();
+  const readinessExpiresAt = String(nowSeconds + READINESS_EXPIRY_SECONDS);
   const readinessTypedData =
     readinessRequired === true
       ? readinessConsentTypedData({
@@ -172,30 +200,63 @@ export async function buildFundingBundle(
           dealId: fullTerms["dealId"]!,
           agreementDigest,
           buyer: buyerAddress,
-          attestedAt: String(nowSeconds),
-          nonce: randomHash(),
-          expiresAt: String(nowSeconds + READINESS_EXPIRY_SECONDS),
+          attestedAt: readinessAttestedAt,
+          nonce: readinessNonce,
+          expiresAt: readinessExpiresAt,
         })
       : null;
 
+  const signatures = (draft.signatures ?? {}) as Record<string, string>;
+  const sigOrNull = (role: DealRole): string | null => {
+    const sig = signatures[`dealTerms:${role}`];
+    return typeof sig === "string" && sig !== "" ? sig : null;
+  };
+  // Operator-granted admission stored via POST /drafts/:id/admission (which
+  // validates the struct). Anything else is not a grant.
+  const grantedRaw = draft.admission;
+  const granted =
+    grantedRaw !== null &&
+    typeof grantedRaw === "object" &&
+    typeof grantedRaw["minPolicyId"] === "string" &&
+    typeof grantedRaw["admissionNonce"] === "string" &&
+    typeof grantedRaw["expiresAt"] === "string" &&
+    typeof grantedRaw["signature"] === "string"
+      ? (grantedRaw as Record<string, string>)
+      : null;
+
+  const principalUnits = terms["principalUnits"] ?? fullTerms["principal"] ?? "0";
+
   return {
+    draftId: draft.id,
     dealId: draft.dealId,
     hub,
-    usdc,
+    token: usdc,
     chainId,
-    fullTerms,
-    agreementDigest,
+    principalUnits,
     fundedUnits: terms["fundedUnits"] ?? "0",
     prepaidBuyerFeeUnits: terms["prepaidBuyerFeeUnits"] ?? "0",
+    fullTerms,
+    agreementDigest,
     dealTermsTypedData: dealTermsTypedData(chainId, hub, fullTerms),
-    allowanceTypedData: allowance,
-    paymentSalt,
-    allowanceNonce,
-    allowanceExpiresAt,
-    readinessRequired,
-    readinessPolicyNote,
-    readinessTypedData,
-    admissionPolicyNote: ADMISSION_POLICY_NOTE,
+    signatures: { buyer: sigOrNull("buyer"), seller: sigOrNull("seller") },
+    allowance: {
+      paymentSalt,
+      nonce: allowanceNonce,
+      expiresAt: allowanceExpiresAt,
+      typedData: allowance,
+    },
+    readiness: {
+      required: readinessRequired,
+      note: readinessPolicyNote,
+      attestedAt: readinessAttestedAt,
+      nonce: readinessNonce,
+      expiresAt: readinessExpiresAt,
+      typedData: readinessTypedData,
+    },
+    admission: {
+      note: ADMISSION_POLICY_NOTE,
+      granted,
+    },
     requiredSignatures: ["buyer", "seller"] as const,
     relayActionTemplate: { action: "fund", params: { dealId: draft.dealId } },
   };

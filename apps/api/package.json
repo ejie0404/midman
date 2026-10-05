@@ -12,6 +12,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "3.1146.0",
     "@fastify/multipart": "9.4.0",
+    "@midman/api-client": "workspace:*",
     "@midman/chain": "workspace:*",
     "@midman/shared": "workspace:*",
     "@midman/store": "workspace:*",

@@ -9,6 +9,7 @@ import Fastify from "fastify";
 import { privateKeyToAccount } from "viem/accounts";
 import { decodeFunctionData, encodeAbiParameters, keccak256, recoverTypedDataAddress } from "viem";
 import { HUB_ABI, TYPES as EIP712_TYPES } from "@midman/chain";
+import { validateFundingBundle, validateRelayFundPayload } from "@midman/api-client";
 
 import { MemoryStore } from "../dist/db.js";
 import { registerRoutes } from "../dist/routes.js";
@@ -116,10 +117,10 @@ function relayBody(overrides = {}) {
     sigBuyer: sigBuyerHex,
     sigSeller: sigSellerHex,
     pay: {
-      validAfter: 0,
-      validBefore: NOW + 3600,
+      validAfter: "0",
+      validBefore: String(NOW + 3600),
       paymentSalt: bytes32("payment-salt"),
-      v: 27,
+      v: "27",
       r: bytes32("r"),
       s: bytes32("s"),
       use3009: false,
@@ -127,19 +128,19 @@ function relayBody(overrides = {}) {
     allowance: {
       paymentSalt: bytes32("payment-salt"),
       nonce: bytes32("allowance-nonce"),
-      expiresAt: NOW + 3600,
+      expiresAt: String(NOW + 3600),
       signature: `0x${"11".repeat(65)}`,
     },
     admission: {
       minPolicyId: bytes32("min-policy"),
       admissionNonce: bytes32("admission-nonce"),
-      expiresAt: NOW + 86_400,
+      expiresAt: String(NOW + 86_400),
       signature: `0x${"22".repeat(65)}`,
     },
     readiness: {
-      attestedAt: NOW,
+      attestedAt: String(NOW),
       nonce: bytes32("readiness-nonce"),
-      expiresAt: NOW + 7200,
+      expiresAt: String(NOW + 7200),
       signature: `0x${"33".repeat(65)}`,
     },
     idempotencyKey: "fund-test-1",
@@ -169,8 +170,18 @@ describe("funding bundle + chain actions (audit #6)", () => {
     assert.deepEqual([...bundle.requiredSignatures], ["buyer", "seller"]);
     assert.equal(bundle.fundedUnits, "100500000");
     assert.equal(bundle.prepaidBuyerFeeUnits, "500000");
+    assert.equal(bundle.token, USDC);
+    assert.equal(bundle.hub, HUB);
+    assert.equal(bundle.chainId, CHAIN_ID);
+    assert.equal(bundle.draftId, id);
+    assert.equal(bundle.principalUnits, "100000000");
+    assert.deepEqual(bundle.signatures, { buyer: null, seller: null });
+    assert.equal(bundle.allowance.paymentSalt, bundle.allowance.typedData.message.paymentSalt);
+    assert.equal(bundle.allowance.nonce, bundle.allowance.typedData.message.nonce);
+    assert.equal(bundle.allowance.expiresAt, bundle.allowance.typedData.message.expiresAt.toString());
     assert.deepEqual(bundle.relayActionTemplate, { action: "fund", params: { dealId } });
-    assert.match(bundle.admissionPolicyNote, /FundingAdmission is required/);
+    assert.match(bundle.admission.note, /FundingAdmission is required/);
+    assert.equal(bundle.admission.granted, null);
   });
 
   it("2. bundle agreementDigest matches buildFullTerms", async () => {
@@ -267,10 +278,10 @@ describe("funding bundle + chain actions (audit #6)", () => {
     const expected = keccak256(
       encodeAbiParameters(
         [{ type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" }],
-        [dealId, bundle.agreementDigest, bundle.paymentSalt],
+        [dealId, bundle.agreementDigest, bundle.allowance.paymentSalt],
       ),
     );
-    assert.equal(paymentNonce(dealId, bundle.agreementDigest, bundle.paymentSalt), expected);
+    assert.equal(paymentNonce(dealId, bundle.agreementDigest, bundle.allowance.paymentSalt), expected);
   });
 
   it("6. buildApproveCalldata encodes approve(spender, amount) and validates token", async () => {
@@ -286,7 +297,7 @@ describe("funding bundle + chain actions (audit #6)", () => {
   it("7. allowanceTypedData signs and recovers to the buyer with the funded amount", async () => {
     const { store, id } = await makeDraft();
     const bundle = await buildFundingBundle(store, makeDeps(store), id, NOW);
-    const typed = bundle.allowanceTypedData;
+    const typed = bundle.allowance.typedData;
     assert.equal(typed.primaryType, "FundWithAllowance");
     assert.deepEqual(
       typed.types.FundWithAllowance.map((f) => f.name),
@@ -294,9 +305,9 @@ describe("funding bundle + chain actions (audit #6)", () => {
     );
     assert.equal(typed.message.payer, buyer.address);
     assert.equal(typed.message.amount, 100500000n);
-    assert.equal(typed.message.paymentSalt, bundle.paymentSalt);
-    assert.equal(typed.message.nonce, bundle.allowanceNonce);
-    assert.equal(bundle.allowanceExpiresAt, String(NOW + ALLOWANCE_WINDOW_SECONDS));
+    assert.equal(typed.message.paymentSalt, bundle.allowance.paymentSalt);
+    assert.equal(typed.message.nonce, bundle.allowance.nonce);
+    assert.equal(bundle.allowance.expiresAt, String(NOW + ALLOWANCE_WINDOW_SECONDS));
     const signature = await buyer.signTypedData({
       domain: typed.domain,
       types: typed.types,
@@ -316,9 +327,9 @@ describe("funding bundle + chain actions (audit #6)", () => {
   it("8. deals longer than 3h are flagged no-readiness with no readiness payload", async () => {
     const { store, id } = await makeDraft();
     const bundle = await buildFundingBundle(store, makeDeps(store), id, NOW);
-    assert.equal(bundle.readinessRequired, false);
-    assert.equal(bundle.readinessTypedData, null);
-    assert.match(bundle.readinessPolicyNote, /longer than 3h/);
+    assert.equal(bundle.readiness.required, false);
+    assert.equal(bundle.readiness.typedData, null);
+    assert.match(bundle.readiness.note, /longer than 3h/);
   });
 
   it("9. <=3h deals with a readiness policy require a signable ReadinessConsent", async () => {
@@ -329,9 +340,9 @@ describe("funding bundle + chain actions (audit #6)", () => {
       policyIds: { ...BASE_POLICIES, readiness: bytes32("readiness-policy") },
     });
     const bundle = await buildFundingBundle(store, makeDeps(store), id, NOW);
-    assert.equal(bundle.readinessRequired, true);
-    assert.ok(bundle.readinessTypedData);
-    const typed = bundle.readinessTypedData;
+    assert.equal(bundle.readiness.required, true);
+    assert.ok(bundle.readiness.typedData);
+    const typed = bundle.readiness.typedData;
     assert.equal(typed.primaryType, "ReadinessConsent");
     assert.equal(typed.message.buyer, buyer.address);
     assert.deepEqual(
@@ -361,9 +372,9 @@ describe("funding bundle + chain actions (audit #6)", () => {
       inspectionSeconds: 3600,
     });
     const bundle = await buildFundingBundle(store, makeDeps(store), id, NOW);
-    assert.equal(bundle.readinessRequired, null);
-    assert.equal(bundle.readinessTypedData, null);
-    assert.match(bundle.readinessPolicyNote, /no readiness policy/i);
+    assert.equal(bundle.readiness.required, null);
+    assert.equal(bundle.readiness.typedData, null);
+    assert.match(bundle.readiness.note, /no readiness policy/i);
   });
 
   it("11. storeDealSignature verifies and persists buyer + seller signatures", async () => {
@@ -551,5 +562,42 @@ describe("funding bundle + chain actions (audit #6)", () => {
       EIP712_TYPES.ReadinessConsent.map((f) => f.name),
     );
     void toHexSig;
+  });
+
+  it("19. wire bundle validates against the canonical @midman/api-client schema", async () => {
+    const { store, id } = await makeDraft();
+    const deps = makeDeps(store);
+    const asWire = (bundle) =>
+      JSON.parse(JSON.stringify(bundle, (_key, item) => (typeof item === "bigint" ? item.toString() : item)));
+    // Unsigned draft: null signatures, null admission — still validates.
+    const unsigned = validateFundingBundle(asWire(await buildFundingBundle(store, deps, id, NOW)));
+    assert.deepEqual(unsigned.signatures, { buyer: null, seller: null });
+    assert.equal(unsigned.admission.granted, null);
+    assert.equal(unsigned.token, USDC);
+    assert.equal(unsigned.principalUnits, "100000000");
+    assert.equal(unsigned.allowance.typedData.primaryType, "FundWithAllowance");
+    // Recorded signatures + granted admission surface in later bundles.
+    const bundle = await buildFundingBundle(store, deps, id, NOW);
+    const buyerSig = await signDealTerms(buyer, bundle.dealTermsTypedData);
+    const sellerSig = await signDealTerms(seller, bundle.dealTermsTypedData);
+    await storeDealSignature(store, id, "buyer", buyerSig);
+    await storeDealSignature(store, id, "seller", sellerSig);
+    const grantSig = `0x${"99".repeat(65)}`;
+    await store.updateDraft(id, {
+      admission: {
+        minPolicyId: bytes32("min"),
+        admissionNonce: bytes32("nonce"),
+        expiresAt: String(NOW + 86_400),
+        signature: grantSig,
+      },
+    });
+    const signed = validateFundingBundle(asWire(await buildFundingBundle(store, deps, id, NOW)));
+    assert.equal(signed.signatures.buyer, buyerSig);
+    assert.equal(signed.signatures.seller, sellerSig);
+    assert.equal(signed.admission.granted.signature, grantSig);
+    // The relay payload shape the web posts validates too.
+    const relay = validateRelayFundPayload({ ...relayBody(), idempotencyKey: "wire-1" });
+    assert.equal(relay.sigBuyer, sigBuyerHex);
+    assert.equal(relay.allowance.expiresAt, String(NOW + 3600));
   });
 });

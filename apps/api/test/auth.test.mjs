@@ -483,7 +483,15 @@ describe("operator routes require session AND signed request", () => {
   it("admission is 200 only for the admission operator with session + signed request", async () => {
     const { app } = makeApp();
     const { id } = await createDraft(app);
-    const admissionBody = { admission: { policy: "x" } };
+    // Canonical admission struct (exact @midman/api-client shape).
+    const admissionBody = {
+      admission: {
+        minPolicyId: `0x${"aa".repeat(32)}`,
+        admissionNonce: `0x${"bb".repeat(32)}`,
+        expiresAt: "1999999999",
+        signature: `0x${"cc".repeat(65)}`,
+      },
+    };
 
     const { cookie: outsiderCookie } = await signIn(app, outsider);
     const outsiderHeaders = {

@@ -21,6 +21,7 @@
     "verify:release": "node scripts/verify-release.mjs",
     "verify:release:optional": "node scripts/verify-release.mjs --optional",
     "e2e:anvil": "node scripts/e2e-anvil.mjs",
+    "e2e:funding": "node scripts/e2e-funding.mjs",
     "readiness": "node scripts/readiness.mjs",
     "db:migrate": "pnpm --filter @midman/api db:migrate"
   },

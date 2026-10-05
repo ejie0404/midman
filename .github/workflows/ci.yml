@@ -30,27 +30,18 @@ jobs:
       - run: node scripts/verify-manifest.mjs
       - run: node scripts/run-drills.mjs
       - run: pnpm test:scripts
-  contracts:
+  # Local contract suites: no external secrets required. Fork tests
+  # (Fork.t.sol) self-skip here without BASE_RPC_URL; real fork evidence is
+  # enforced by the base-fork job below, so a skip can never pass silently.
+  contracts-local:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
-      # Base fork tests are release evidence (RB-06): they self-skip without
-      # BASE_RPC_URL, so require the secret here. Without it the release gate
-      # cannot prove native-USDC / sequencer-feed behavior on real Base state.
-      - name: Require BASE_RPC_URL for Base fork evidence
-        run: |
-          if [ -z "${{ secrets.BASE_RPC_URL }}" ]; then
-            echo "::error::BASE_RPC_URL secret is not set — Base fork tests would self-skip. Add a Base mainnet RPC URL as the BASE_RPC_URL repo secret."
-            exit 1
-          fi
       - run: cd packages/contracts && forge build --sizes
       - run: cd packages/contracts && forge test
-        env:
-          # Fork suite self-skips when unset; set this secret for full RB-06 evidence.
-          BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
       # ABI drift gate: the generated chain ABIs must be regenerated from the
       # freshly built artifacts. A contract/ABI change that did not re-run the
       # exporter fails here, so a stale export can never pass CI.
@@ -58,13 +49,32 @@ jobs:
       - run: git diff --exit-code -- packages/chain/src/abi/generated
       # Live deploy + release-verification on a throwaway anvil chain.
       - run: node scripts/e2e-anvil.mjs
+  # Base fork evidence (RB-06): pinned-block fork tests against real Base
+  # mainnet state (native USDC + sequencer feed). Fails without the secret.
+  base-fork:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Require BASE_RPC_URL for Base fork evidence
+        run: |
+          if [ -z "${{ secrets.BASE_RPC_URL }}" ]; then
+            echo "::error::BASE_RPC_URL secret is not set — Base fork tests cannot run. Add a Base mainnet RPC URL as the BASE_RPC_URL repo secret."
+            exit 1
+          fi
+      - run: cd packages/contracts && forge build
+      - run: cd packages/contracts && forge test --match-path test/Fork.t.sol
+        env:
+          BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
   # Mandatory release gate: fails if any required suite or tool is unavailable.
   # It re-runs the full integration set (spec model, node tests, script tests,
   # forge build/test/e2e/adversarial, anvil e2e) in one job. Local runs may use
   # `node scripts/verify-release.mjs --optional` to skip unavailable tools.
   release:
     runs-on: ubuntu-latest
-    needs: [node, contracts]
+    needs: [node, contracts-local, base-fork]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -79,3 +89,8 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@v1
       - run: pnpm install --frozen-lockfile
       - run: node scripts/verify-release.mjs
+        env:
+          # Full release verification includes the Base fork suite.
+          BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
+      # Real API -> web -> relay -> anvil funding proof (no fixtures).
+      - run: node scripts/e2e-funding.mjs

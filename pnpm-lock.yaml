@@ -24,6 +24,9 @@ importers:
       '@fastify/multipart':
         specifier: 9.4.0
         version: 9.4.0
+      '@midman/api-client':
+        specifier: workspace:*
+        version: link:../../packages/api-client
       '@midman/chain':
         specifier: workspace:*
         version: link:../../packages/chain

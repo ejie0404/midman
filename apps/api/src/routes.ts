@@ -17,6 +17,7 @@ import {
   type DraftTermsInput,
 } from "./terms.js";
 import type { FeeAllocationBps } from "@midman/shared";
+import { validateAdmissionStruct, validateRelayFundPayload } from "@midman/api-client";
 import { registerJourneyRoutes } from "./journey.js";
 import { buildFullTerms } from "./fullTerms.js";
 import {
@@ -168,9 +169,21 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/drafts/:id/admission", async (request, reply) => {
     const draft = await deps.store.getDraft(request.params.id);
     if (!draft) return reply.code(404).send(bad("Draft not found"));
-    const admission = request.body["admission"];
-    if (!admission || typeof admission !== "object") return reply.code(400).send(bad("Missing admission"));
-    await deps.store.updateDraft(draft.id, { admission: admission as Record<string, string>, status: "admitted" });
+    // Strict canonical admission struct: only a valid grant is stored, so the
+    // funding bundle can expose it verbatim (no re-validation downstream).
+    let admission: Record<string, string>;
+    try {
+      const validated = validateAdmissionStruct(request.body["admission"], "admission");
+      admission = {
+        minPolicyId: validated.minPolicyId,
+        admissionNonce: validated.admissionNonce,
+        expiresAt: validated.expiresAt,
+        signature: validated.signature,
+      };
+    } catch (error) {
+      return reply.code(400).send(bad(error instanceof Error ? error.message : "Invalid admission"));
+    }
+    await deps.store.updateDraft(draft.id, { admission, status: "admitted" });
     auditLog({ actor: "admission", action: "draft.admission", dealId: draft.dealId });
     return { ok: true };
   });
@@ -373,7 +386,6 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   });
 
   // ---- Funding flow (audit finding #6): full 32-field DealTerms + fund() ----
-  const HEX_RE = /^0x[0-9a-fA-F]+$/;
   // Typed-data messages carry bigints (for wallets); JSON has no bigint, so
   // decimal strings are the transport convention (same as awards/terms).
   const jsonSafe = <T>(value: T): T =>
@@ -420,21 +432,33 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     async (request, reply) => {
       const draft = await deps.store.getDraft(request.params.id);
       if (!draft) return reply.code(404).send(bad("Draft not found"));
-      const body = request.body;
-      const idempotencyKey = String(body["idempotencyKey"] ?? "");
-      const sigBuyer = String(body["sigBuyer"] ?? "");
-      const sigSeller = String(body["sigSeller"] ?? "");
-      if (!idempotencyKey) return reply.code(400).send(bad("Missing idempotencyKey"));
-      if (!HEX_RE.test(sigBuyer) || !HEX_RE.test(sigSeller)) {
-        return reply.code(400).send(bad("sigBuyer and sigSeller must be hex signatures"));
+      // Single canonical relay-fund contract (@midman/api-client): exact field
+      // names sigBuyer/sigSeller + completed pay/allowance/admission/readiness
+      // structs. Anything else is a 400 — no silent field-shape drift.
+      let payload: {
+        idempotencyKey: string;
+        sigBuyer: string;
+        sigSeller: string;
+        pay: Payment3009Input;
+        allowance: AllowanceIntentInput;
+        admission: AdmissionInput;
+        readiness: ReadinessAuthInput;
+      };
+      try {
+        const validated = validateRelayFundPayload(request.body, "relay-fund");
+        payload = {
+          idempotencyKey: validated.idempotencyKey,
+          sigBuyer: validated.sigBuyer,
+          sigSeller: validated.sigSeller,
+          pay: validated.pay,
+          allowance: validated.allowance,
+          admission: validated.admission,
+          readiness: validated.readiness,
+        };
+      } catch (error) {
+        return reply.code(400).send(bad(error instanceof Error ? error.message : "Invalid fund payload"));
       }
-      const pay = body["pay"];
-      const allowance = body["allowance"];
-      const admission = body["admission"];
-      const readiness = body["readiness"];
-      if (![pay, allowance, admission, readiness].every((value) => value && typeof value === "object")) {
-        return reply.code(400).send(bad("pay, allowance, admission and readiness are required"));
-      }
+      const { idempotencyKey, sigBuyer, sigSeller, pay, allowance, admission, readiness } = payload;
       try {
         const terms = draft.terms as CanonicalTerms;
         const hub = (deps.hub ?? terms["hub"]!) as Address;

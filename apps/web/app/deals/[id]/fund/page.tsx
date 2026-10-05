@@ -12,6 +12,7 @@ import {
   getWalletClient,
 } from "../../../../lib/wallet";
 import {
+  assembleRelayPayload,
   directFund,
   fetchFundingBundle,
   fetchFundingStatus,
@@ -21,7 +22,6 @@ import {
   submitDealSignatures,
   submitRelayFund,
   waitForFundingEvent,
-  withFundingSignatures,
   type FundingBundle,
 } from "../../../../lib/funding";
 import { formatUnixDate } from "../../../../lib/money";
@@ -33,8 +33,6 @@ import TxStatus from "../../../components/TxStatus";
 import { button, card, error, mono, nav, ok, page, secondaryButton, warning } from "../../../components/styles";
 
 type Phase = "idle" | "working" | "pending-event" | "funded" | "failed";
-
-const ZERO_HASH = `0x${"0".repeat(64)}` as `0x${string}`;
 
 function errText(e: unknown): string {
   return e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
@@ -71,10 +69,12 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
     try {
       const loaded = await fetchFundingBundle(idToLoad);
       setBundle(loaded);
+      // The bundle carries signing params, never wallet signatures: prefill
+      // only the draft's recorded DealTerms signatures.
       setBuyerSig(loaded.signatures.buyer ?? "");
       setSellerSig(loaded.signatures.seller ?? "");
-      setReadinessSig(loaded.readiness?.signature ?? "");
-      setAllowanceSig(loaded.allowance?.signature ?? "");
+      setReadinessSig("");
+      setAllowanceSig("");
     } catch (e) {
       setBundleError(errText(e));
     } finally {
@@ -103,12 +103,14 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
     return addr;
   }
 
-  function currentBundle(): FundingBundle {
+  function structSigs() {
     if (!bundle) throw new Error("Funding bundle not loaded");
-    const overrides: { allowanceSignature?: string; readinessSignature?: string } = {};
-    if (allowanceSig) overrides.allowanceSignature = allowanceSig;
-    if (readinessSig) overrides.readinessSignature = readinessSig;
-    return withFundingSignatures(bundle, overrides);
+    return {
+      buyer: buyerSig.trim(),
+      seller: sellerSig.trim(),
+      allowance: allowanceSig.trim(),
+      ...(readinessSig.trim() ? { readiness: readinessSig.trim() } : {}),
+    };
   }
 
   async function signAsBuyer() {
@@ -126,10 +128,7 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
 
   async function signReadinessConsent() {
     setFailure(null);
-    if (!bundle || !bundle.readiness) {
-      setFailure("This bundle has no readiness payload to sign. Obtain it from the readiness service first.");
-      return;
-    }
+    if (!bundle) return;
     try {
       const addr = await requireAccount();
       if (!bundle.agreementDigest) throw new Error("Bundle is missing agreementDigest");
@@ -154,10 +153,7 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
 
   async function signAllowanceIntentLocal() {
     setFailure(null);
-    if (!bundle || !bundle.allowance) {
-      setFailure("This bundle has no allowance intent to sign.");
-      return;
-    }
+    if (!bundle) return;
     try {
       const addr = await requireAccount();
       if (!bundle.agreementDigest) throw new Error("Bundle is missing agreementDigest");
@@ -190,11 +186,17 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
     if (!sigs.buyer) throw new Error("Buyer DealTerms signature missing. Sign with the wallet first.");
     if (!sigs.seller) throw new Error("Seller DealTerms signature missing. Paste the seller signature first.");
     if (!bundle) throw new Error("Funding bundle not loaded");
-    if (!bundle.admission || bundle.admission.signature === "" || bundle.admission.signature === "0x") {
+    if (!bundle.admission.granted || bundle.admission.granted.signature === "") {
       throw new Error("Signed admission authorization is missing. Attach the operator-signed admission first.");
     }
-    if (bundle.requiresReadiness && (readinessSig === "" || readinessSig === "0x")) {
+    if (bundle.readiness.required === true && (readinessSig === "" || readinessSig === "0x")) {
       throw new Error("This deal requires a readiness consent signature before funding.");
+    }
+    if (bundle.readiness.required === null) {
+      throw new Error("Readiness requirement is unknown for this draft. Refusing to fund.");
+    }
+    if (allowanceSig === "" || allowanceSig === "0x") {
+      throw new Error("Allowance intent signature missing. Sign the allowance intent first.");
     }
   }
 
@@ -222,22 +224,17 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
       if (!draftId) throw new Error("Funding requires a draft id (draft_…)");
       assertReady();
       const addr = await requireAccount();
-      const b = currentBundle();
-      const sigs = effectiveSignatures();
+      if (!bundle) throw new Error("Funding bundle not loaded");
       const relayWallet = getWalletClient();
-      await ensureChainId(relayWallet as unknown as { getChainId(): Promise<number> }, b.chainId);
-      const result = await submitRelayFund(draftId, {
-        buyerSignature: sigs.buyer,
-        sellerSignature: sigs.seller,
-        payer: addr,
-        ...(readinessSig ? { readinessSignature: readinessSig } : {}),
-        ...(allowanceSig ? { allowanceSignature: allowanceSig } : {}),
-      });
+      await ensureChainId(relayWallet as unknown as { getChainId(): Promise<number> }, bundle.chainId);
+      void addr;
+      const payload = assembleRelayPayload(bundle, structSigs());
+      const result = await submitRelayFund(draftId, payload);
       setPhase("pending-event");
       setDetail(
         `Relay accepted (${result.status}). A relay acceptance is NOT inclusion — waiting for the relayer tx and the DealFunded event…`,
       );
-      const confirmed = await waitForFundingEvent(draftId, b.hub, b.dealId, { intervalMs: 5_000, timeoutMs: 300_000 });
+      const confirmed = await waitForFundingEvent(draftId, bundle.hub, bundle.dealId, { intervalMs: 5_000, timeoutMs: 300_000 });
       setTxHash(confirmed.txHash);
       setPhase("funded");
       setDetail(
@@ -262,16 +259,10 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
       if (!bundle) throw new Error("Funding bundle not loaded");
       assertReady();
       const addr = await requireAccount();
-      const b = currentBundle();
-      const sigs = effectiveSignatures();
       const wallet = getWalletClient();
-      await ensureChainId(wallet as unknown as { getChainId(): Promise<number> }, b.chainId);
-      setDetail(
-        b.pay?.use3009
-          ? "Submitting fund() with EIP-3009 receiveWithAuthorization (no approve needed) — pending until included."
-          : "Submitting ERC20 approve, then fund() — approve alone is not funding.",
-      );
-      const result = await directFund(b, sigs, { account: addr as `0x${string}` });
+      await ensureChainId(wallet as unknown as { getChainId(): Promise<number> }, bundle.chainId);
+      setDetail("Submitting ERC20 approve, then fund() — approve alone is not funding.");
+      const result = await directFund(bundle, structSigs(), { account: addr as `0x${string}` });
       setApproveTxHash(result.approveTxHash);
       setTxHash(result.fundTxHash);
       setPhase("funded");
@@ -320,10 +311,12 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
   const chainOk = chainId === CHAIN_ID;
   const bothSigned = Boolean(buyerSig.trim() && sellerSig.trim());
   const admissionReady = Boolean(
-    bundle?.admission && bundle.admission.signature !== "" && bundle.admission.signature !== "0x",
+    bundle?.admission.granted &&
+      bundle.admission.granted.signature !== "" &&
+      bundle.admission.granted.signature !== "0x",
   );
-  const readinessReady = !bundle?.requiresReadiness || Boolean(readinessSig);
-  const allowanceReady = !bundle?.allowance || Boolean(allowanceSig) || bundle?.pay?.use3009 === true;
+  const readinessReady = bundle?.readiness.required !== true || Boolean(readinessSig);
+  const allowanceReady = Boolean(allowanceSig);
 
   if (!draftId && !terms) {
     return (
@@ -434,7 +427,7 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
             </label>
           </div>
 
-          {bundle.requiresReadiness ? (
+          {bundle.readiness.required === true ? (
             <div style={warning}>
               <strong>Readiness consent required (short-delivery deal).</strong> The hub rejects funding unless the
               buyer&apos;s ReadinessConsent signature is attached.
@@ -457,16 +450,17 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
             <p style={{ fontSize: 14 }}>
               The hub requires an operator-signed admission. The web never mints admission signatures.
             </p>
-            {bundle.admission ? (
+            {bundle.admission.granted ? (
               <p style={mono}>
-                minPolicyId {bundle.admission.minPolicyId.slice(0, 12)}… · nonce{" "}
-                {bundle.admission.admissionNonce.slice(0, 12)}… · expires {String(bundle.admission.expiresAt)} · signature{" "}
-                {bundle.admission.signature ? "✓ present" : "✗ missing"}
+                minPolicyId {bundle.admission.granted.minPolicyId.slice(0, 12)}… · nonce{" "}
+                {bundle.admission.granted.admissionNonce.slice(0, 12)}… · expires{" "}
+                {String(bundle.admission.granted.expiresAt)} · signature{" "}
+                {bundle.admission.granted.signature ? "✓ present" : "✗ missing"}
               </p>
             ) : (
               <div style={warning}>No admission attached to this bundle yet.</div>
             )}
-            {bundle.admissionNote ? <p style={{ fontSize: 13 }}>{bundle.admissionNote}</p> : null}
+            <p style={{ fontSize: 13 }}>{bundle.admission.note}</p>
             {!admissionReady ? (
               <>
                 <textarea
@@ -484,10 +478,13 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
                       setBundle({
                         ...bundle,
                         admission: {
-                          minPolicyId: parsed.minPolicyId as `0x${string}`,
-                          admissionNonce: parsed.admissionNonce as `0x${string}`,
-                          expiresAt: BigInt(parsed.expiresAt),
-                          signature: parsed.signature,
+                          ...bundle.admission,
+                          granted: {
+                            minPolicyId: parsed.minPolicyId as `0x${string}`,
+                            admissionNonce: parsed.admissionNonce as `0x${string}`,
+                            expiresAt: BigInt(parsed.expiresAt),
+                            signature: parsed.signature,
+                          },
                         },
                       });
                       setDetail("Admission authorization attached to the local bundle.");
@@ -504,19 +501,17 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
             )}
           </div>
 
-          {bundle.allowance && bundle.pay?.use3009 !== true ? (
-            <div style={card}>
-              <h2>Allowance intent (direct path)</h2>
-              <p style={{ fontSize: 14 }}>
-                The non-3009 direct path needs a FundWithAllowance signature for the exact amount. The relay path does
-                not.
-              </p>
-              <button type="button" style={secondaryButton} onClick={() => void signAllowanceIntentLocal()} disabled={!account}>
-                {allowanceSig ? "Re-sign allowance intent" : "Sign allowance intent"}
-              </button>
-              <span style={{ fontSize: 13, marginLeft: 8 }}>{allowanceReady ? "✓ ready" : "✗ missing"}</span>
-            </div>
-          ) : null}
+          <div style={card}>
+            <h2>Allowance intent</h2>
+            <p style={{ fontSize: 14 }}>
+              Both funding paths need a FundWithAllowance signature for the exact amount. Sign it with the buyer
+              wallet after connecting.
+            </p>
+            <button type="button" style={secondaryButton} onClick={() => void signAllowanceIntentLocal()} disabled={!account}>
+              {allowanceSig ? "Re-sign allowance intent" : "Sign allowance intent"}
+            </button>
+            <span style={{ fontSize: 13, marginLeft: 8 }}>{allowanceReady ? "✓ ready" : "✗ missing"}</span>
+          </div>
 
           <div style={card}>
             <h2>Submit funding</h2>
@@ -533,7 +528,7 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
               disabled={working || !bothSigned || !admissionReady || !readinessReady}
               onClick={() => void fundDirect()}
             >
-              {bundle.pay?.use3009 ? "Direct: fund() via EIP-3009" : "Direct: approve + fund()"}
+              Direct: approve + fund()
             </button>
             <button type="button" style={secondaryButton} onClick={() => void refreshStatus()}>
               Refresh funding status

@@ -13,12 +13,14 @@ import {
   signDealTerms,
   signAllowance,
   signReadiness,
+  assembleRelayPayload,
   buildFundCalldata,
   buildApproveCalldata,
   directFund,
   submitRelayFund,
   waitForFundingEvent,
 } from "../lib/funding.ts";
+import { validateRelayFundPayload } from "@midman/api-client";
 import { confirmEvent, TxRevertedError, EventNotFoundError } from "../lib/wallet.ts";
 import { ApiError } from "../lib/api.ts";
 
@@ -36,9 +38,10 @@ const BUYER = "0x4444444444444444444444444444444444444444";
 const SELLER = "0x5555555555555555555555555555555555555555";
 
 function fullTerms(overrides = {}) {
+  // Wire fidelity: uints are decimal strings (JSON has no bigint).
   return {
     dealId: DEAL,
-    termsVersion: 1,
+    termsVersion: "1",
     buyerAddress: BUYER,
     sellerAddress: SELLER,
     sellerPayoutAddress: SELLER,
@@ -48,11 +51,11 @@ function fullTerms(overrides = {}) {
     token: TOKEN,
     principal: "100000000",
     quotedPlatformFee: "1000000",
-    buyerFeeBps: 5000,
+    buyerFeeBps: "5000",
     agreementHash: AGREEMENT,
     feePolicyId: ZERO,
-    deliveryPeriodSeconds: 3600,
-    inspectionPeriodSeconds: 43200,
+    deliveryPeriodSeconds: "3600",
+    inspectionPeriodSeconds: "43200",
     categoryPolicyId: ZERO,
     readinessPolicyId: ZERO,
     readinessConsentHash: ZERO,
@@ -83,27 +86,64 @@ function typedData(overrides = {}) {
   };
 }
 
+function allowanceEnvelope() {
+  return {
+    domain: { name: "MidmanEscrow", version: "1", chainId: 8453, verifyingContract: HUB },
+    types: { FundWithAllowance: [] },
+    primaryType: "FundWithAllowance",
+    message: {
+      dealId: DEAL,
+      agreementDigest: AGREEMENT,
+      payer: BUYER,
+      amount: "100500000",
+      paymentSalt: ZERO,
+      nonce: `0x${"03".repeat(32)}`,
+      expiresAt: "1999999999",
+    },
+  };
+}
+
+// Canonical wire bundle: exact @midman/api-client field names, decimal
+// strings for uints. This is the shape the real API emits.
 function rawBundle(overrides = {}) {
   return {
     draftId: "draft_test",
     dealId: DEAL,
-    agreementDigest: AGREEMENT,
     chainId: 8453,
     hub: HUB,
     token: TOKEN,
+    principalUnits: "100000000",
     fundedUnits: "100500000",
     prepaidBuyerFeeUnits: "500000",
-    principalUnits: "100000000",
-    requiresReadiness: false,
+    agreementDigest: AGREEMENT,
     dealTermsTypedData: typedData(),
     fullTerms: fullTerms(),
     signatures: { buyer: null, seller: null },
-    pay: { validAfter: 0, validBefore: 1999999999, paymentSalt: ZERO, v: 0, r: ZERO, s: ZERO, use3009: false },
-    allowance: { paymentSalt: ZERO, nonce: `0x${"03".repeat(32)}`, expiresAt: 1999999999, signature: "0x" },
-    admission: { minPolicyId: ZERO, admissionNonce: `0x${"04".repeat(32)}`, expiresAt: 1999999999, signature: "0xad" },
-    readiness: null,
-    fundCalldataTemplate: null,
-    admissionNote: null,
+    allowance: {
+      paymentSalt: ZERO,
+      nonce: `0x${"03".repeat(32)}`,
+      expiresAt: "1999999999",
+      typedData: allowanceEnvelope(),
+    },
+    readiness: {
+      required: false,
+      note: "no-readiness policy",
+      attestedAt: "0",
+      nonce: ZERO,
+      expiresAt: "0",
+      typedData: null,
+    },
+    admission: {
+      note: "admission required",
+      granted: {
+        minPolicyId: ZERO,
+        admissionNonce: `0x${"04".repeat(32)}`,
+        expiresAt: "1999999999",
+        signature: "0xad",
+      },
+    },
+    requiredSignatures: ["buyer", "seller"],
+    relayActionTemplate: { action: "fund", params: { dealId: DEAL } },
     ...overrides,
   };
 }
@@ -206,9 +246,14 @@ describe("funding bundle parsing (finding #6: full DealTerms)", () => {
     const b = parsedBundle();
     assert.equal(b.dealId, DEAL);
     assert.equal(b.chainId, 8453);
+    assert.equal(b.token, TOKEN);
+    assert.equal(b.principalUnits, "100000000");
     assert.equal(b.fundedUnits, "100500000");
     assert.equal(b.prepaidBuyerFeeUnits, "500000");
-    assert.equal(b.requiresReadiness, false);
+    assert.equal(b.readiness.required, false);
+    assert.equal(b.allowance.paymentSalt, ZERO);
+    assert.equal(b.allowance.expiresAt, 1999999999n);
+    assert.equal(b.admission.granted.signature, "0xad");
     assert.equal(b.dealTermsTypedData.types.DealTerms.length, 32);
     assert.equal(b.dealTermsTypedData.domain.name, "MidmanEscrow");
     assert.equal(typeof b.dealTermsTypedData.message.principal, "bigint");
@@ -216,27 +261,19 @@ describe("funding bundle parsing (finding #6: full DealTerms)", () => {
     assert.equal(b.fullTerms.buyerFeeBps, 5000n);
   });
 
-  it("accepts alias field names (terms/sigs/payment)", () => {
+  it("rejects alias/legacy field names instead of null-filling (no silent drift)", () => {
     const raw = rawBundle();
-    const aliased = {
-      dealId: raw.dealId,
-      chainId: raw.chainId,
-      hub: raw.hub,
-      token: raw.token,
-      fundedUnits: raw.fundedUnits,
-      prepaidFeeUnits: raw.prepaidBuyerFeeUnits,
-      principal: raw.principalUnits,
-      terms: raw.fullTerms,
-      sigs: { buyer: "0xbuyer", seller: "0xseller" },
-      payment: raw.pay,
-      allowanceIntent: raw.allowance,
-      admission: raw.admission,
-      dealTerms: raw.dealTermsTypedData,
-    };
-    const b = parseFundingBundle(aliased, "draft_alias");
-    assert.equal(b.signatures.buyer, "0xbuyer");
-    assert.equal(b.signatures.seller, "0xseller");
-    assert.equal(b.prepaidBuyerFeeUnits, "500000");
+    delete raw.token;
+    raw.usdc = TOKEN;
+    assert.throws(() => parseFundingBundle(raw, "d"), /token/);
+    const raw2 = rawBundle();
+    delete raw2.allowance;
+    raw2.allowanceIntent = { paymentSalt: ZERO, nonce: ZERO, expiresAt: "1", typedData: allowanceEnvelope() };
+    assert.throws(() => parseFundingBundle(raw2, "d"), /allowance/);
+    const raw3 = rawBundle();
+    delete raw3.principalUnits;
+    raw3.principal = "100000000";
+    assert.throws(() => parseFundingBundle(raw3, "d"), /principalUnits/);
   });
 
   it("rejects a bundle missing fundedUnits", () => {
@@ -357,15 +394,21 @@ describe("calldata builders", () => {
     assert.equal(decoded.args[1], 100500000n);
   });
 
-  it("buildFundCalldata requires BOTH DealTerms signatures", () => {
+  it("buildFundCalldata requires buyer, seller AND allowance signatures", () => {
     const b = parsedBundle();
-    assert.throws(() => buildFundCalldata(b, { buyer: "0xbuyer", seller: "" }), /seller/);
-    assert.throws(() => buildFundCalldata(b, { buyer: "", seller: "0xseller" }), /buyer/);
+    const full = { buyer: "0xbuyer", seller: "0xseller", allowance: `0x${"a1".repeat(65)}` };
+    assert.throws(() => buildFundCalldata(b, { ...full, seller: "" }), /seller/);
+    assert.throws(() => buildFundCalldata(b, { ...full, buyer: "" }), /buyer/);
+    assert.throws(() => buildFundCalldata(b, { ...full, allowance: "" }), /allowance/);
   });
 
   it("buildFundCalldata encodes fund(...) with the full struct + both sigs", () => {
     const b = parsedBundle();
-    const data = buildFundCalldata(b, { buyer: `0x${"b1".repeat(65)}`, seller: `0x${"c1".repeat(65)}` });
+    const data = buildFundCalldata(b, {
+      buyer: `0x${"b1".repeat(65)}`,
+      seller: `0x${"c1".repeat(65)}`,
+      allowance: `0x${"a1".repeat(65)}`,
+    });
     const decoded = decodeFunctionData({ abi: HUB_ABI, data });
     assert.equal(decoded.functionName, "fund");
     assert.equal(decoded.args[0].dealId, DEAL);
@@ -387,7 +430,7 @@ describe("directFund: approve THEN fund (never approve-only)", () => {
     });
     const result = await directFund(
       parsedBundle(),
-      { buyer: `0x${"b1".repeat(65)}`, seller: `0x${"c1".repeat(65)}` },
+      { buyer: `0x${"b1".repeat(65)}`, seller: `0x${"c1".repeat(65)}`, allowance: `0x${"a1".repeat(65)}` },
       { walletClient: wallet, publicClient, account: BUYER },
     );
     assert.equal(wallet.sent.length, 2);
@@ -412,7 +455,7 @@ describe("directFund: approve THEN fund (never approve-only)", () => {
     });
     const result = await directFund(
       parsedBundle(),
-      { buyer: `0x${"b1".repeat(65)}`, seller: `0x${"c1".repeat(65)}` },
+      { buyer: `0x${"b1".repeat(65)}`, seller: `0x${"c1".repeat(65)}`, allowance: `0x${"a1".repeat(65)}` },
       { walletClient: wallet, publicClient, account: BUYER },
     );
     assert.equal(wallet.sent.length, 1);
@@ -431,7 +474,7 @@ describe("directFund: approve THEN fund (never approve-only)", () => {
       () =>
         directFund(
           parsedBundle(),
-          { buyer: `0x${"b1".repeat(65)}`, seller: `0x${"c1".repeat(65)}` },
+          { buyer: `0x${"b1".repeat(65)}`, seller: `0x${"c1".repeat(65)}`, allowance: `0x${"a1".repeat(65)}` },
           { walletClient: wallet, publicClient, account: BUYER },
         ),
       (e) => {
@@ -453,7 +496,7 @@ describe("directFund: approve THEN fund (never approve-only)", () => {
       () =>
         directFund(
           parsedBundle(),
-          { buyer: `0x${"b1".repeat(65)}`, seller: `0x${"c1".repeat(65)}` },
+          { buyer: `0x${"b1".repeat(65)}`, seller: `0x${"c1".repeat(65)}`, allowance: `0x${"a1".repeat(65)}` },
           { walletClient: wallet, publicClient, account: BUYER },
         ),
       (e) => {
@@ -499,19 +542,28 @@ describe("confirmEvent requires the exact event + matching dealId", () => {
 // ---- Relay path ----
 
 describe("relay funding path", () => {
-  it("submitRelayFund POSTs an idempotency key to /drafts/:id/relay-fund", async () => {
+  it("submitRelayFund POSTs the canonical sigBuyer/sigSeller + structs body", async () => {
     const calls = [];
     const fetchImpl = async (url, init) => {
       calls.push({ url, body: JSON.parse(init.body) });
       return jsonResponse(200, { idempotencyKey: "x", inserted: true, status: "queued" });
     };
-    const res = await submitRelayFund(
-      "draft_r",
-      { buyerSignature: "0xb", sellerSignature: "0xc", payer: BUYER },
-      { fetchImpl },
-    );
+    const payload = assembleRelayPayload(parsedBundle(), {
+      buyer: `0x${"b1".repeat(65)}`,
+      seller: `0x${"c1".repeat(65)}`,
+      allowance: `0x${"a1".repeat(65)}`,
+    });
+    // The assembled body satisfies the canonical API contract verbatim.
+    validateRelayFundPayload(payload);
+    const res = await submitRelayFund("draft_r", payload, { fetchImpl });
     assert.equal(res.status, "queued");
     assert.match(calls[0].url, /\/drafts\/draft_r\/relay-fund$/);
+    assert.match(calls[0].body.sigBuyer, /^0xb1/);
+    assert.match(calls[0].body.sigSeller, /^0xc1/);
+    assert.equal(calls[0].body.allowance.signature, `0x${"a1".repeat(65)}`);
+    assert.equal(calls[0].body.admission.signature, "0xad");
+    // Readiness is not required by this fixture: hub-ignored slot is explicit.
+    assert.equal(calls[0].body.readiness.signature, "0x00");
     assert.ok(typeof calls[0].body.idempotencyKey === "string" && calls[0].body.idempotencyKey.length > 0);
   });
 
