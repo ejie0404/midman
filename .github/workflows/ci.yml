@@ -7,6 +7,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: pnpm/action-setup@v4
         with:
           version: 9.12.3
@@ -14,11 +16,16 @@ jobs:
         with:
           node-version: "24"
           cache: pnpm
+      - uses: foundry-rs/foundry-toolchain@v1
       - run: pnpm install --frozen-lockfile
       - run: node specs/validate-spec.mjs
       - run: pnpm -r build
       - run: pnpm -r typecheck
       - run: pnpm -r test
+      # Contract artifacts must exist before the script suites run:
+      # export-abi.test.mjs compares the generated ABIs against forge build
+      # output, so a missing `forge build` fails the suite deterministically.
+      - run: cd packages/contracts && forge build
       - run: node scripts/policy-hash.mjs
       - run: node scripts/verify-manifest.mjs
       - run: node scripts/run-drills.mjs
@@ -30,6 +37,15 @@ jobs:
         with:
           submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
+      # Base fork tests are release evidence (RB-06): they self-skip without
+      # BASE_RPC_URL, so require the secret here. Without it the release gate
+      # cannot prove native-USDC / sequencer-feed behavior on real Base state.
+      - name: Require BASE_RPC_URL for Base fork evidence
+        run: |
+          if [ -z "${{ secrets.BASE_RPC_URL }}" ]; then
+            echo "::error::BASE_RPC_URL secret is not set — Base fork tests would self-skip. Add a Base mainnet RPC URL as the BASE_RPC_URL repo secret."
+            exit 1
+          fi
       - run: cd packages/contracts && forge build --sizes
       - run: cd packages/contracts && forge test
         env:

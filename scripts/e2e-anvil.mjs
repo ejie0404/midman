@@ -51,38 +51,57 @@ export const DEV_PANELS = {
   ],
 };
 
-function foundryBin(name) {
+const EXE = process.platform === "win32" ? ".exe" : "";
+
+/**
+ * Resolve a foundry binary portably: explicit `<NAME>_BIN` env override
+ * first, then repo-adjacent staged installs (local dev machines), then the
+ * bare name which resolves via PATH (GitHub Actions foundry-toolchain,
+ * system installs). Never defaults to a platform-specific absolute path.
+ */
+function stagedBin(name) {
   const candidates = [
-    process.env[`${name.toUpperCase()}_BIN`],
-    path.join(REPO_ROOT, "..", "opencode", "foundry", `${name}.exe`),
-    `${name}`,
-  ].filter(Boolean);
-  for (const c of candidates) {
-    if (c === name || existsSync(c)) return c;
+    // Repo-adjacent staging used by local dev setups.
+    path.join(REPO_ROOT, "..", "opencode", "foundry", `${name}${EXE}`),
+  ];
+  if (process.platform === "win32") {
+    // Legacy absolute staging from an earlier dev machine. Win32-only and
+    // only used when the file actually exists — never a spawn default.
+    candidates.push(`C:/Users/subze/AppData/Local/Temp/opencode/foundry/${name}.exe`);
   }
-  return name;
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return null;
+}
+
+function resolveBin(name) {
+  const fromEnv = process.env[`${name.toUpperCase()}_BIN`];
+  if (fromEnv) return fromEnv;
+  return stagedBin(name) ?? name;
+}
+
+function binWorks(bin) {
+  try {
+    return spawnSync(bin, ["--version"], { encoding: "utf8" }).status === 0;
+  } catch {
+    return false;
+  }
 }
 
 function findForge() {
-  for (const c of [
-    process.env["FORGE_BIN"],
-    "C:/Users/subze/AppData/Local/Temp/opencode/foundry/forge.exe",
-    "forge",
-  ]) {
-    if (c && (c === "forge" || existsSync(c))) return c;
-  }
-  return null;
+  const bin = resolveBin("forge");
+  return binWorks(bin) ? bin : null;
 }
 
 function findAnvil() {
-  for (const c of [
-    process.env["ANVIL_BIN"],
-    "C:/Users/subze/AppData/Local/Temp/opencode/foundry/anvil.exe",
-    "anvil",
-  ]) {
-    if (c && (c === "anvil" || existsSync(c))) return c;
-  }
-  return null;
+  const bin = resolveBin("anvil");
+  return binWorks(bin) ? bin : null;
+}
+
+function findCast() {
+  const bin = resolveBin("cast");
+  return binWorks(bin) ? bin : null;
 }
 
 /** Parse the deterministic addresses from DeployDev's broadcast artifact. */
@@ -163,12 +182,27 @@ function deployedCodeHash(cast, address) {
   return viem.keccak256(code.startsWith("0x") ? code : `0x${code}`);
 }
 
+/**
+ * Wait for anvil JSON-RPC readiness with a plain eth_blockNumber probe.
+ * Uses global fetch only — no external binary — so this behaves
+ * identically on Windows, macOS, and Linux CI runners.
+ */
 async function waitForRpc(timeoutMs) {
-  const cast = process.env["CAST_BIN"] ?? "C:/Users/subze/AppData/Local/Temp/opencode/foundry/cast.exe";
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const r = spawnSync(cast, ["block-number", "--rpc-url", ANVIL_RPC], { encoding: "utf8" });
-    if (r.status === 0) return true;
+    try {
+      const res = await fetch(ANVIL_RPC, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json && typeof json.result === "string") return true;
+      }
+    } catch {
+      // Not up yet; retry until the deadline.
+    }
     await new Promise((res) => setTimeout(res, 200));
   }
   return false;
@@ -211,7 +245,8 @@ async function main() {
     const { readFileSync } = await import("node:fs");
     const deployment = parseDeploymentFromArtifact(JSON.parse(readFileSync(artifactPath, "utf8")));
     const contentHashes = await hashAll();
-    const cast = process.env["CAST_BIN"] ?? "C:/Users/subze/AppData/Local/Temp/opencode/foundry/cast.exe";
+    const cast = findCast();
+    if (!cast) throw new Error("cast binary not found (set CAST_BIN or install the foundry toolchain)");
     const bytecodeHashes = {
       MidmanHub: deployedCodeHash(cast, deployment.hub),
       MidmanPolicies: deployedCodeHash(cast, deployment.policies),
