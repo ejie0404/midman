@@ -28,6 +28,7 @@ import {
 } from "../dist/evidence/registry.js";
 import {
   assertReceiptSignerConfigured,
+  receiptKeyIdFor,
   signReceipt,
   verifyReceiptWithHistory,
   __resetReceiptSignerForTests,
@@ -62,6 +63,7 @@ const MANAGED_ENV = [
   "EVIDENCE_KEK_HISTORY",
   "EVIDENCE_DIR",
   "EVIDENCE_SCAN_FORCE",
+  "EVIDENCE_ALLOW_DEFERRED",
   "EVIDENCE_REQUIRE_CONTENT_BINDING",
   "EVIDENCE_SUPERVISOR",
   "EVIDENCE_REVIEWER_ALLOWLIST",
@@ -91,6 +93,9 @@ function resetEnv() {
   process.env["EVIDENCE_KEK_HEX"] = KEK_A;
   process.env["EVIDENCE_DIR"] = evidenceDir;
   process.env["EVIDENCE_SCAN_FORCE"] = "deferred";
+  // Development default: serve deferred scans. Production never sets this;
+  // dedicated tests prove deferred is blocked without the opt-in.
+  process.env["EVIDENCE_ALLOW_DEFERRED"] = "1";
   process.env["RECEIPT_SIGNER_KEY"] = RECEIPT_KEY;
   process.env["REVIEWER_WALLETS"] = reviewer.address;
 }
@@ -433,8 +438,9 @@ describe("Phase 6 · scan-state enforcement", () => {
     assert.equal(blocked.json().status, "quarantined");
   });
 
-  it("serves deferred content but never labels it clean", async () => {
+  it("blocks deferred downloads by default; serves them only with the dev opt-in", async () => {
     process.env["EVIDENCE_SCAN_FORCE"] = "deferred";
+    delete process.env["EVIDENCE_ALLOW_DEFERRED"];
     const { app, store } = await makeApp();
     const dealId = dealIdOf("52");
     await seedDeal(store, dealId);
@@ -444,8 +450,14 @@ describe("Phase 6 · scan-state enforcement", () => {
     assert.equal(res.json().scan.status, "deferred");
     assert.notEqual(res.json().scan.status, "clean");
     const url = `/evidence/${res.json().fileHash}?dealId=${dealId}`;
-    const downloaded = await app.inject({ method: "GET", url, headers: await signedGet(buyer, url) });
-    assert.equal(downloaded.statusCode, 200);
+    const blocked = await app.inject({ method: "GET", url, headers: await signedGet(buyer, url) });
+    assert.equal(blocked.statusCode, 409);
+    assert.equal(blocked.json().status, "deferred");
+    // Explicit development opt-in restores serving (still never labeled clean).
+    process.env["EVIDENCE_ALLOW_DEFERRED"] = "1";
+    const served = await app.inject({ method: "GET", url, headers: await signedGet(buyer, url) });
+    assert.equal(served.statusCode, 200);
+    assert.deepEqual(Buffer.from(served.rawPayload), bytes);
   });
 
   it("blocks download of an error-state object with 409", async () => {
@@ -541,13 +553,36 @@ describe("Phase 6 · durable receipt signing", () => {
   });
 
   it("verifies a receipt issued under a historical key after the active key changes", async () => {
-    const receipt = await signReceipt({ dealId: dealIdOf("72"), seq: 1, fileHash: `0x${"7b".repeat(32)}` });
-    // Rotate the configured signer: the old receipt must still verify via history.
+    // Issue under V1, then rotate the active signer away from it.
     process.env["RECEIPT_SIGNER_KEY"] = RECEIPT_KEY_V1;
+    __resetReceiptSignerForTests();
+    const receipt = await signReceipt({ dealId: dealIdOf("72"), seq: 1, fileHash: `0x${"7b".repeat(32)}` });
     const historicalVerifier = privateKeyToAccount(RECEIPT_KEY_V1);
+    assert.equal(receipt.signer.toLowerCase(), historicalVerifier.address.toLowerCase());
+    process.env["RECEIPT_SIGNER_KEY"] = RECEIPT_KEY;
+    __resetReceiptSignerForTests();
     const result = await verifyReceiptWithHistory(receipt, [historicalVerifier.address]);
     assert.equal(result.valid, true);
+    assert.equal(result.knownKey, true);
     assert.equal(result.recovered.toLowerCase(), receipt.signer.toLowerCase());
+  });
+
+  it("rejects an attacker-minted receipt even with a self-consistent keyId", async () => {
+    const attacker = privateKeyToAccount(`0x${"99".repeat(32)}`);
+    const payload = `MidmanReceipt|${dealIdOf("73")}|0|0x${"7c".repeat(32)}`;
+    const signature = await attacker.signMessage({ message: payload });
+    // Internally consistent (keyId matches the attacker) but untrusted: the
+    // attacker is not in the configured key history.
+    const forged = {
+      payload,
+      signature,
+      signer: attacker.address,
+      keyId: receiptKeyIdFor(attacker.address),
+      version: 2,
+    };
+    const result = await verifyReceiptWithHistory(forged, [buyer.address]);
+    assert.equal(result.knownKey, false);
+    assert.equal(result.valid, false);
   });
 });
 

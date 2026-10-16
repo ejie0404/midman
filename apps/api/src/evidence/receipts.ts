@@ -165,10 +165,13 @@ export async function verifyReceiptWithHistory(
 
   const expectedKeyId =
     receipt.keyId ?? (receipt.signer ? receiptKeyIdFor(receipt.signer) : undefined);
-  const knownKey =
-    configured.size === 0 ||
-    configured.has(recovered.toLowerCase()) ||
-    expectedKeyId === receiptKeyIdFor(recovered);
+  // knownKey is MEMBERSHIP in the configured key history — never
+  // self-consistency. A keyId that matches its own signer proves the receipt
+  // is internally consistent (keyIdMatches, checked separately), not that the
+  // signer belongs to Midman: anyone can mint a key, sign, and derive the
+  // matching keyId. With no history configured we fall back to the
+  // self-declared signer (dev only; production configures a durable signer).
+  const knownKey = configured.size === 0 || configured.has(recovered.toLowerCase());
   const keyIdMatches =
     receipt.keyId === undefined || receipt.keyId === receiptKeyIdFor(recovered);
   return {

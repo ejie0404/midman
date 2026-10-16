@@ -1827,6 +1827,27 @@ export interface ErrorResponse {
   readonly error: string;
 }
 
+export interface ReadinessResponse {
+  readonly ready: boolean;
+  readonly missing: string[];
+  readonly checks: Record<string, boolean>;
+}
+
+export function validateReadinessResponse(value: unknown, path = "$"): ReadinessResponse {
+  const obj = needRecord(value, path);
+  const missing = obj["missing"];
+  if (!Array.isArray(missing) || missing.some((entry) => typeof entry !== "string")) {
+    throw new ApiValidationError(`${path}.missing`, "expected a string array");
+  }
+  const checksRaw = needRecord(obj["checks"], `${path}.checks`);
+  const checks: Record<string, boolean> = {};
+  for (const [key, entry] of Object.entries(checksRaw)) {
+    if (typeof entry !== "boolean") throw new ApiValidationError(`${path}.checks.${key}`, "expected a boolean");
+    checks[key] = entry;
+  }
+  return { ready: needBoolean(obj, "ready", path), missing, checks };
+}
+
 export function validateErrorResponse(value: unknown, path = "$"): ErrorResponse {
   const obj = needRecord(value, path);
   return { error: needString(obj, "error", path) };

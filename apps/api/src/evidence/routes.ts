@@ -22,7 +22,7 @@ import { getSharedBlobStore } from "./store.js";
 import {
   GENESIS_PREVHASH,
   getSharedRegistry,
-  isBlockedScanState,
+  isServableScanState,
   type ManifestEntry,
 } from "./registry.js";
 import { assertReceiptSignerConfigured, scanBytes, signReceipt, type SignedReceipt } from "./receipts.js";
@@ -80,8 +80,11 @@ async function authPartyOrReviewer(
 }
 
 /**
- * Normalized scan state. infected/quarantined/pending/error are not servable;
- * clean/deferred are servable (deferred is NEVER relabeled clean).
+ * Normalized scan state. Only `clean` is servable by default; `deferred`
+ * requires the explicit EVIDENCE_ALLOW_DEFERRED=1 development opt-in (never
+ * in production). infected/quarantined/pending/error are never servable;
+ * deferred is NEVER relabeled clean. The audited exceptional original export
+ * (`?exportOriginal=1`) bypasses this gate with its own permission + audit.
  */
 export function scanStateOf(entry: ManifestEntry | undefined): string {
   if (!entry) return "missing";
@@ -263,7 +266,7 @@ export function registerEvidenceRoutes(app: FastifyInstance, deps: EvidenceRoute
         });
       } else {
         const state = scanStateOf(entry);
-        if (isBlockedScanState(state)) {
+        if (!isServableScanState(state)) {
           return reply
             .code(409)
             .send({ error: "Evidence unavailable pending malware review", status: state });
@@ -344,7 +347,7 @@ export function registerEvidenceRoutes(app: FastifyInstance, deps: EvidenceRoute
           return reply.code(404).send({ ok: false, error: "Evidence blob was purged under retention policy" });
         }
         const state = scanStateOf(entry);
-        if (isBlockedScanState(state)) {
+        if (!isServableScanState(state)) {
           return reply
             .code(409)
             .send({ ok: false, status: state, error: "Evidence unavailable pending malware review" });

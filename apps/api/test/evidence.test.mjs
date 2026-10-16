@@ -174,6 +174,10 @@ describe("evidence subsystem", () => {
   before(async () => {
     process.env["EVIDENCE_KEK_HEX"] = "ab".repeat(32);
     process.env["RECEIPT_SIGNER_KEY"] = RECEIPT_KEY;
+    // Development default so deferred-scan downloads work here; the
+    // fail-closed default (blocked without this flag) is proven in the
+    // phase6/hardening suites. Never set in production.
+    process.env["EVIDENCE_ALLOW_DEFERRED"] = "1";
     evidenceDir = await mkdtemp(join(tmpdir(), "midman-evidence-"));
     process.env["EVIDENCE_DIR"] = evidenceDir;
     process.env["REVIEWER_WALLETS"] = reviewer.address;

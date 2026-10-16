@@ -174,9 +174,18 @@ export function isBlockedScanState(state: string): boolean {
   return state === "infected" || state === "quarantined" || state === "pending" || state === "error";
 }
 
-/** True for scan states a normal party download may serve (never claims clean). */
+/**
+ * True for scan states a normal party download may serve. Fail-closed:
+ * anything but `clean` is blocked unless the deployment explicitly opts in
+ * to serving unscanned (`deferred`) content via EVIDENCE_ALLOW_DEFERRED=1
+ * (local development only — never set in production; production readiness
+ * requires a real malware scanner). Deferred content is NEVER relabeled
+ * clean.
+ */
 export function isServableScanState(state: string): boolean {
-  return state === "clean" || state === "deferred";
+  if (state === "clean") return true;
+  if (state === "deferred") return process.env["EVIDENCE_ALLOW_DEFERRED"] === "1";
+  return false;
 }
 
 export interface ManifestRegistry {

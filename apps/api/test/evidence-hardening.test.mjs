@@ -46,6 +46,7 @@ const MANAGED_ENV = [
   "EVIDENCE_KEK_HISTORY",
   "EVIDENCE_DIR",
   "EVIDENCE_SCAN_FORCE",
+  "EVIDENCE_ALLOW_DEFERRED",
   "EVIDENCE_SUPERVISOR",
   "EVIDENCE_REVIEWER_ALLOWLIST",
   "EVIDENCE_REQUIRE_CONTENT_BINDING",
@@ -68,6 +69,9 @@ function resetEnv() {
   process.env["EVIDENCE_KEK_HEX"] = KEK_A;
   process.env["EVIDENCE_DIR"] = evidenceDir;
   process.env["EVIDENCE_SCAN_FORCE"] = "deferred";
+  // Development default: serve deferred scans. Production never sets this;
+  // dedicated tests prove deferred is blocked without the opt-in.
+  process.env["EVIDENCE_ALLOW_DEFERRED"] = "1";
   process.env["RECEIPT_SIGNER_KEY"] = RECEIPT_KEY;
 }
 
@@ -564,8 +568,9 @@ describe("evidence hardening", () => {
     assert.equal(manifest.json().entries[0].scan.status, "infected");
   });
 
-  it("records a deferred scan honestly and never labels it clean", async () => {
+  it("records a deferred scan honestly; download blocked without the dev opt-in", async () => {
     process.env["EVIDENCE_SCAN_FORCE"] = "deferred";
+    delete process.env["EVIDENCE_ALLOW_DEFERRED"];
     const { app, store } = await makeApp();
     const dealId = `0x${"52".repeat(32)}`;
     await seedDeal(store, dealId);
@@ -577,11 +582,20 @@ describe("evidence hardening", () => {
     assert.equal(res.json().quarantined, false);
 
     const downloadPath = `/evidence/${res.json().fileHash}?dealId=${dealId}`;
-    const downloaded = await app.inject({
+    const blocked = await app.inject({
       method: "GET",
       url: downloadPath,
       headers: await signedHeaders(buyer, "GET", downloadPath),
     });
-    assert.equal(downloaded.statusCode, 200);
+    assert.equal(blocked.statusCode, 409);
+    assert.equal(blocked.json().status, "deferred");
+
+    process.env["EVIDENCE_ALLOW_DEFERRED"] = "1";
+    const served = await app.inject({
+      method: "GET",
+      url: downloadPath,
+      headers: await signedHeaders(buyer, "GET", downloadPath),
+    });
+    assert.equal(served.statusCode, 200);
   });
 });
