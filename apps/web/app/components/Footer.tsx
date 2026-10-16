@@ -1,58 +1,40 @@
-import {
-  brand,
-  brandTag,
-  footerBar,
-  footerInner,
-  footerLink,
-} from "./styles";
+import { BrandMark } from "./ui";
 
-const LINKS = [
-  { href: "/", label: "Home" },
-  { href: "/deals/new", label: "New deal" },
-  { href: "/review", label: "Review queue" },
-];
+const HUB = process.env["NEXT_PUBLIC_HUB_ADDRESS"] ?? "";
+const EXPLORER = process.env["NEXT_PUBLIC_EXPLORER_URL"] ?? "https://basescan.org";
 
 export default function Footer() {
   return (
-    <footer style={footerBar}>
-      <div style={footerInner}>
-        <div>
-          <span style={{ ...brand, fontSize: 14 }}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <rect
-                x="1.5"
-                y="1.5"
-                width="21"
-                height="21"
-                rx="6"
-                stroke="var(--accent)"
-                strokeWidth="1.6"
-              />
-              <path
-                d="M8 12.5l2.6 2.6L16.5 9.5"
-                stroke="var(--accent)"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-            <span>Midman</span>
-            <span style={brandTag}>escrow</span>
+    <footer className="site-footer">
+      <div className="container row spread" style={{ alignItems: "flex-start", gap: 24 }}>
+        <div style={{ maxWidth: 420 }}>
+          <span className="brand" style={{ fontSize: 14 }}>
+            <BrandMark size={18} />
+            Midman
           </span>
-          <p style={{ margin: "8px 0 0", maxWidth: 380 }}>
-            Private-link USDC escrow on Base. No on-chain action without explicit
-            wallet authorization.
+          <p style={{ marginTop: 8 }}>
+            USDC escrow on Base. Funds are held by an on-chain contract, not by Midman, and nothing moves without
+            your wallet&apos;s signature.
           </p>
         </div>
-        <div>
-          {LINKS.map((l) => (
-            <a key={l.href} href={l.href} style={footerLink}>
-              {l.label}
-            </a>
-          ))}
-          <p style={{ margin: "8px 0 0" }}>
-            Midman V1 · dev build · inclusion is the only truth
-          </p>
+        <div className="row" style={{ gap: 20, alignItems: "flex-start" }}>
+          <div className="stack" style={{ gap: 6 }}>
+            <span className="eyebrow">Product</span>
+            <a href="/deals">My deals</a>
+            <a href="/deals/new">New deal</a>
+            <a href="/#fees">Fees</a>
+            <a href="/#faq">FAQ</a>
+          </div>
+          <div className="stack" style={{ gap: 6 }}>
+            <span className="eyebrow">Trust</span>
+            {/^0x[0-9a-fA-F]{40}$/.test(HUB) ? (
+              <a href={`${EXPLORER}/address/${HUB}`} target="_blank" rel="noreferrer">
+                Escrow contract
+              </a>
+            ) : null}
+            <a href="/emergency.html">Emergency exit</a>
+            <a href="/review">Reviewer sign-in</a>
+          </div>
         </div>
       </div>
     </footer>

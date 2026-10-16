@@ -88,6 +88,29 @@ before the audit, not after.
   Still open from Phase 2: deadline notifications (needs an email/Telegram
   provider choice) and smart-wallet signatures (USDC `bytes` 3009 overload,
   ERC-6492), which moves to the wallet work in Phase 3.
+- **Phase 3 (first pass done):** new design system (light/dark/system theme,
+  Geist via `next/font`, tokens + component classes, legacy styles re-skinned),
+  responsive header with one "Sign in" account button and mobile menu, landing
+  page with corrected copy, fee calculator and FAQ, "My deals" dashboard,
+  three-step create-deal wizard (agreement text now stored and hash-checked),
+  and a deal room with progress stepper and role-aware next-action card.
+- **Phase 3 (second pass done):** multi-wallet picker (EIP-6963 discovery,
+  Coinbase Wallet, WalletConnect when `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`
+  is set) behind the existing viem helpers; human-readable error messages;
+  review/fund/deliver/inspect/claim rebuilt on the new components. Fixed on
+  the way: party action signatures used `agreementHash` instead of the terms
+  digest (delivery, dispute, settlement would revert `BadSig`); relayed
+  release/refund sent no signature; the fund page posted DealTerms
+  signatures in a shape the API rejects; the recovery package exported a
+  zero digest and the wrong signatures.
+- **Gasless deposits (done):** the buyer signs USDC's
+  `ReceiveWithAuthorization` (token domain read from chain) and the relayer
+  funds with `use3009`; no ETH, no approve. The approve path remains as a
+  fallback for smart-contract wallets. Proven on anvil (buyer sends 0 txs)
+  and covered against real Base USDC by `Fork.t.sol`.
+  Still open: smart-wallet signatures on chain
+  (ERC-1271 works for deployed wallets; ERC-6492 for undeployed ones and the
+  USDC `bytes` 3009 overload need contract changes), deadline notifications.
 
 ## Phases
 

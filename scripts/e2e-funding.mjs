@@ -39,6 +39,7 @@ const ERC20_ABI = [
   { type: "function", name: "mint", stateMutability: "nonpayable", inputs: [{ name: "to", type: "address" }, { name: "amount", type: "uint256" }], outputs: [] },
   { type: "function", name: "approve", stateMutability: "nonpayable", inputs: [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }], outputs: [{ type: "bool" }] },
   { type: "function", name: "balanceOf", stateMutability: "view", inputs: [{ name: "owner", type: "address" }], outputs: [{ type: "uint256" }] },
+  { type: "function", name: "allowance", stateMutability: "view", inputs: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }], outputs: [{ type: "uint256" }] },
 ];
 
 function reqFrom(mod) {
@@ -259,7 +260,8 @@ async function main() {
     if (!bundle2.admission.granted || bundle2.admission.granted.signature !== admissionSig)
       throw new Error("granted admission missing from bundle");
 
-    // 8. Fund the buyer + approve the hub (allowance path needs ERC20 approval).
+    // 8. Fund the buyer with USDC only. The deposit is gasless (EIP-3009):
+    //    the buyer signs, never sends a transaction, and never approves.
     const mintHash = await operatorClient.writeContract({
       address: usdc,
       abi: ERC20_ABI,
@@ -268,33 +270,19 @@ async function main() {
       chain: anvil,
     });
     await publicClient.waitForTransactionReceipt({ hash: mintHash });
-    const approveHash = await buyerClient.writeContract({
-      address: usdc,
-      abi: ERC20_ABI,
-      functionName: "approve",
-      args: [hub, BigInt(bundle2.fundedUnits)],
-      chain: anvil,
-    });
-    await publicClient.waitForTransactionReceipt({ hash: approveHash });
+    const buyerTxsBefore = await publicClient.getTransactionCount({ address: buyer.address });
 
-    // 9. Buyer signs the allowance intent -> assemble the canonical relay body.
-    const allowanceSig = await webFunding.signAllowance(
-      buyer.address,
-      {
-        dealId: bundle2.dealId,
-        agreementDigest: bundle2.agreementDigest,
-        payer: buyer.address,
-        amount: BigInt(bundle2.fundedUnits),
-        paymentSalt: bundle2.allowance.paymentSalt,
-        nonce: bundle2.allowance.nonce,
-        expiresAt: bundle2.allowance.expiresAt,
-      },
-      { chainId: bundle2.chainId, hub: bundle2.hub },
-      { walletClient: buyerClient },
-    );
-    const sigs = { buyer: buyerSig, seller: sellerSig, allowance: allowanceSig };
+    // 9. Buyer signs USDC's ReceiveWithAuthorization (token domain read from
+    //    chain) -> assemble the canonical relay body with use3009 = true.
+    if (!bundle2.payment3009) throw new Error("bundle has no gasless deposit parameters");
+    const payment = await webFunding.signPayment3009(buyer.address, bundle2, {
+      walletClient: buyerClient,
+      publicClient,
+    });
+    const sigs = { buyer: buyerSig, seller: sellerSig, payment };
     const payload = webFunding.assembleRelayPayload(bundle2, sigs);
     apiClient.validateRelayFundPayload(payload); // canonical contract, verbatim
+    if (payload.pay.use3009 !== true) throw new Error("relay payload is not using the gasless path");
     const relayed = checkStatus(await call("POST", `/drafts/${draftId}/relay-fund`, payload), "relay-fund");
     if (relayed.inserted !== true) throw new Error("relay job was not inserted");
 
@@ -314,10 +302,14 @@ async function main() {
     );
     const hubBalance = await publicClient.readContract({ address: usdc, abi: ERC20_ABI, functionName: "balanceOf", args: [hub] });
     if (hubBalance !== BigInt(bundle2.fundedUnits)) throw new Error(`hub balance ${hubBalance} != funded ${bundle2.fundedUnits}`);
+    const buyerTxsAfter = await publicClient.getTransactionCount({ address: buyer.address });
+    if (buyerTxsAfter !== buyerTxsBefore) throw new Error("buyer sent a transaction: the deposit was not gasless");
+    const allowanceLeft = await publicClient.readContract({ address: usdc, abi: ERC20_ABI, functionName: "allowance", args: [buyer.address, hub] });
+    if (allowanceLeft !== 0n) throw new Error("gasless deposit must not leave or need an ERC-20 allowance");
 
     console.log(`FUNDED deal=${bundle2.dealId} tx=${receipt.transactionHash}`);
     console.log(`event DealFunded args.dealId=${event.args["dealId"]}`);
-    console.log("E2E FUNDING: PASS (api -> web -> relay -> anvil -> DealFunded)");
+    console.log("E2E FUNDING: PASS (api -> web -> gasless EIP-3009 relay -> anvil -> DealFunded; buyer sent 0 txs)");
     await app.close();
   } finally {
     for (const [key, value] of Object.entries(savedEnv)) {

@@ -42,6 +42,18 @@ export function formatUnits(units: string | bigint, decimals: number = DEFAULT_D
   return `${groupThousands(whole.toString())}.${frac}`;
 }
 
+/**
+ * Human display of an exact amount: thousands separators, trailing zeros
+ * trimmed down to 2 decimals ("1,234.50", "0.123456"). Never rounds.
+ */
+export function formatAmount(units: string | bigint): string {
+  const full = formatUnits(units);
+  const [whole, frac = ""] = full.split(".");
+  let trimmed = frac.replace(/0+$/, "");
+  if (trimmed.length < 2) trimmed = trimmed.padEnd(2, "0");
+  return `${whole}.${trimmed}`;
+}
+
 /** Format smallest units as "1,234.567890 USDC". */
 export function formatUSDC(units: string | bigint): string {
   return `${formatUnits(units)} USDC`;
@@ -99,3 +111,19 @@ export function formatUnixDate(unixSeconds: string | number): string {
   if (!Number.isInteger(n)) throw new TypeError("Timestamp must be integer seconds");
   return new Date(n * 1_000).toISOString();
 }
+
+/** Friendly span for windows and countdowns: "3 days", "1 day 6 hours", "45 minutes". */
+export function formatSpan(totalSeconds: number): string {
+  if (!Number.isInteger(totalSeconds) || totalSeconds < 0) {
+    throw new RangeError("Duration must be a non-negative integer");
+  }
+  const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"}`;
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  if (days > 0) return hours > 0 ? `${plural(days, "day")} ${plural(hours, "hour")}` : plural(days, "day");
+  if (hours > 0) return minutes > 0 ? `${plural(hours, "hour")} ${plural(minutes, "minute")}` : plural(hours, "hour");
+  if (minutes > 0) return plural(minutes, "minute");
+  return plural(totalSeconds, "second");
+}
+

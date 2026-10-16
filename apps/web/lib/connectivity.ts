@@ -16,6 +16,7 @@
 //   here, so diagnostics redact nothing.
 
 import { useSyncExternalStore } from "react";
+import { getActiveProvider } from "./providers.ts";
 
 // ---- 1. Central config ----
 
@@ -317,11 +318,7 @@ function detachProvider(): void {
 }
 
 function defaultProvider(): EthereumProvider {
-  if (typeof window !== "undefined" && window.ethereum !== undefined) {
-    const candidate = window.ethereum as unknown as EthereumProvider;
-    if (typeof candidate.request === "function") return candidate;
-  }
-  throw new Error("No browser wallet found (window.ethereum is missing)");
+  return getActiveProvider() as unknown as EthereumProvider;
 }
 
 /**

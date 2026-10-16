@@ -601,3 +601,18 @@ describe("funding bundle + chain actions (audit #6)", () => {
     assert.equal(relay.allowance.expiresAt, String(NOW + 3600));
   });
 });
+
+describe("gasless deposit parameters", () => {
+  it("bind the EIP-3009 authorization to the buyer, the hub, the exact amount and this deal", async () => {
+    const { store, id, terms } = await makeDraft();
+    const bundle = await buildFundingBundle(store, makeDeps(store), id, NOW);
+    const { agreementDigest } = buildFullTerms(terms, HUB);
+    assert.equal(bundle.payment3009.from.toLowerCase(), buyer.address.toLowerCase());
+    assert.equal(bundle.payment3009.to, HUB);
+    assert.equal(bundle.payment3009.value, terms.fundedUnits);
+    assert.equal(bundle.payment3009.validAfter, "0");
+    assert.equal(bundle.payment3009.validBefore, String(NOW + 3_600));
+    // Exactly the nonce MidmanHub.fund() derives: keccak256(abi.encode(dealId, digest, paymentSalt)).
+    assert.equal(bundle.payment3009.nonce, paymentNonce(terms.dealId, agreementDigest, bundle.payment3009.paymentSalt));
+  });
+});

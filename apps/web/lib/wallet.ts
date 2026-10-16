@@ -1,4 +1,4 @@
-// Wallet helpers (viem 2.9.0). Base chain, browser wallet via window.ethereum.
+// Wallet helpers (viem 2.9.0). Base chain, the user's selected EIP-1193 wallet (lib/providers.ts).
 // All money stays bigint/strings; signatures match the API/contract typed data.
 
 import {
@@ -15,6 +15,7 @@ import {
 } from "viem";
 import { base } from "viem/chains";
 import { HUB_ABI, TYPES as EIP712_TYPES, buildDomain } from "@midman/chain";
+import { getActiveProvider } from "./providers.ts";
 
 declare global {
   interface Window {
@@ -46,11 +47,9 @@ export function getPublicClient() {
   return createPublicClient({ chain: baseChain, transport: http(RPC_URL) });
 }
 
+/** The wallet the user picked (lib/providers.ts), falling back to window.ethereum. */
 function requireEthereum() {
-  if (typeof window === "undefined" || !window.ethereum) {
-    throw new Error("No browser wallet found (window.ethereum is missing)");
-  }
-  return window.ethereum;
+  return getActiveProvider();
 }
 
 export function getWalletClient() {
@@ -589,4 +588,43 @@ export function confirmEvent(
     return { eventName, args, address: log.address };
   }
   throw new EventNotFoundError(receipt.transactionHash, eventName);
+}
+
+// ---- EIP-712 ApproveSeller / RefundBuyer (contract domain MidmanEscrow v1) ----
+// Required when the release/refund is relayed: the relayer submits, but only
+// the actor's signature (buyer to release, seller to refund) authorizes it.
+
+export interface SettleIntent {
+  readonly dealId: Hash;
+  /** The deal's EIP-712 terms digest (terms.agreementDigest), never agreementHash. */
+  readonly agreementDigest: Hash;
+  readonly actor: Address;
+  readonly terminalPolicyVersion: Hash;
+  readonly nonce: Hash;
+  readonly expiresAt: bigint;
+}
+
+export async function signSettle(
+  kind: "approveSeller" | "refundBuyer",
+  hub: Address,
+  chainId: number,
+  intent: SettleIntent,
+): Promise<Hash> {
+  const account = await getAccount();
+  const client = getWalletClient();
+  const primaryType = kind === "approveSeller" ? "ApproveSeller" : "RefundBuyer";
+  return (await client.signTypedData({
+    account,
+    domain: { name: "MidmanEscrow", version: "1", chainId, verifyingContract: hub },
+    types: { [primaryType]: EIP712_TYPES[primaryType] } as never,
+    primaryType,
+    message: {
+      dealId: intent.dealId,
+      agreementDigest: intent.agreementDigest,
+      actor: intent.actor,
+      terminalPolicyVersion: intent.terminalPolicyVersion,
+      nonce: intent.nonce,
+      expiresAt: intent.expiresAt,
+    },
+  } as never)) as Hash;
 }

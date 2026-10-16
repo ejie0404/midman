@@ -1,225 +1,267 @@
 "use client";
 
+// Deal room: one place that says where the deal stands, what you should do
+// next, and the exact money and deadlines. Detailed actions live on the
+// sub-pages (review, fund, deliver, inspect, claim) that the next-action card
+// links to.
+
 import { use } from "react";
 import { useDeal } from "../../components/useDeal";
-import { formatFeePct, formatUSDC, formatUnixDate } from "../../../lib/money";
+import { useSession } from "../../components/useSession";
+import { formatAmount, formatSpan, formatUnixDate } from "../../../lib/money";
+import {
+  DEAL_STEPS,
+  categoryLabel,
+  dealStage,
+  nextAction,
+  shortAddress,
+  stepStates,
+  type DealRole,
+} from "../../../lib/dealPhase";
 import Countdown from "../../components/Countdown";
 import TxStatus from "../../components/TxStatus";
 import FallbackNotice from "../../components/FallbackNotice";
-import Money from "../../components/Money";
-import { PROGRESS_STEPS } from "../../../lib/deal";
-import { button, card, error, mono, nav, ok, page, warning } from "../../components/styles";
 import EvidenceSection from "../../components/EvidenceSection";
 import DisputeProgress from "../../components/DisputeProgress";
 import MessagesThread from "../../components/MessagesThread";
-import SessionBadge from "../../components/SessionBadge";
+import { Button, ButtonLink, Callout, Card, Chip, Icon, KeyValues } from "../../components/ui";
 
-function stepIndex(view: ReturnType<typeof useDeal>): number {
-  const phase = view.dealStatus?.phase;
-  if (phase === "SETTLED") return 8;
-  if (phase && ["SELF_RESOLUTION", "AWAITING_ESCALATION", "EVIDENCE", "PRIMARY_REVIEW", "FALLBACK_REVIEW", "RULING_PENDING", "DEADLOCK"].includes(phase)) return 7;
-  if (phase === "DELIVERED") return 6;
-  if (phase === "AWAITING_DELIVERY") return 5;
-  if (view.draftStatus === "admitted") return 4;
-  if (view.draftStatus === "signed") return 3;
-  if (view.draftStatus === "accepted") return 2;
-  if (view.draftStatus === "invited") return 1;
-  return 0;
+function Party({ label, address, you }: { label: string; address: string; you: boolean }) {
+  return (
+    <div className="row spread">
+      <span className="muted">{label}</span>
+      <span className="row" style={{ gap: 8 }}>
+        <span className="mono" title={address}>
+          {shortAddress(address)}
+        </span>
+        {you ? <Chip tone="info">You</Chip> : null}
+      </span>
+    </div>
+  );
 }
 
-export default function DealDashboard({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params);
-  const view = useDeal(decodeURIComponent(id));
+export default function DealRoom({ params }: { params: Promise<{ id: string }> }) {
+  const { id: rawId } = use(params);
+  const id = decodeURIComponent(rawId);
+  const view = useDeal(id);
+  const { session, loading: sessionLoading, connect } = useSession();
 
-  if (view.loading) {
+  if (view.loading || sessionLoading) {
     return (
-      <main style={page}>
-        <p>Loading deal…</p>
+      <main className="container page stack">
+        <div className="skeleton" style={{ height: 40, width: 280 }} />
+        <div className="skeleton" style={{ height: 140 }} />
+        <div className="skeleton" style={{ height: 220 }} />
       </main>
     );
   }
+
   if (!view.terms && !view.dealStatus) {
+    const needsAuth = !session && /401|auth/i.test(view.error ?? "");
     return (
-      <main style={page}>
-        <h1>Deal not found</h1>
-        <div style={error}>{view.error ?? "Unknown deal."}</div>
-        <p style={nav}>
-          <a href="/">← Home</a>
-        </p>
+      <main className="container container-narrow page stack">
+        {needsAuth ? (
+          <div className="card" style={{ textAlign: "center", padding: 32 }}>
+            <span className="feature-icon" style={{ margin: "0 auto 12px" }}>
+              <Icon name="lock" />
+            </span>
+            <h1 style={{ fontSize: "1.5rem" }}>Sign in to view this deal</h1>
+            <p className="muted">Deal details are private to the buyer and seller. Sign in with the wallet named in the deal.</p>
+            <Button onClick={() => void connect().then(() => window.location.reload()).catch(() => undefined)}>
+              Sign in with wallet
+            </Button>
+          </div>
+        ) : (
+          <>
+            <h1>Deal not found</h1>
+            <Callout tone="danger">{view.error ?? "We couldn't find a deal with this ID."}</Callout>
+            <ButtonLink href="/deals" variant="secondary">
+              Back to my deals
+            </ButtonLink>
+          </>
+        )}
       </main>
     );
   }
 
   const terms = view.terms;
-  const current = stepIndex(view);
-  const phase = view.dealStatus?.phase ?? view.draftStatus ?? "DRAFT";
-  const exhausted = view.dealStatus?.disputeUsed === true;
+  const chainPhase = view.dealStatus && view.dealStatus.source !== "draft" ? (view.dealStatus.phase ?? null) : null;
+  const stage = dealStage(chainPhase, view.draftStatus);
+  const me = session?.wallet.toLowerCase() ?? "";
+  const role: DealRole | null =
+    terms && me ? (terms.buyer.toLowerCase() === me ? "buyer" : terms.seller.toLowerCase() === me ? "seller" : null) : null;
+  const action = nextAction(chainPhase, view.draftStatus, role);
+  const base = `/deals/${encodeURIComponent(id)}`;
+  const title = terms?.["title"] || categoryLabel(terms?.category);
+  const agreementText = terms?.["agreementText"];
+  const states = stepStates(stage);
 
   return (
-    <main style={page}>
-      <h1>Deal dashboard</h1>
-      <p style={nav}>
-        <a href="/">← Home</a>
-      </p>
-
-      <SessionBadge />
-
-      <div style={card}>
-        <h2>
-          Phase: {phase} <span style={{ fontSize: 13 }}>(source: {view.dealStatus?.source ?? "draft"})</span>
-        </h2>
-        {view.confirmation ? (
-          <p>
-            Chain confirmation: <TxStatus level={view.confirmation.level} />
-          </p>
-        ) : (
-          <p style={{ fontSize: 14 }}>
-            Confirmation: unavailable{view.confirmationError ? ` (${view.confirmationError})` : ""} — treat all
-            off-chain state as pending until included.
-          </p>
-        )}
-        {exhausted ? (
-          <div style={warning}>
-            <strong>Dispute exhausted.</strong> This deal&apos;s single free dispute freeze has been used
-            (`disputeUsed`). No further freeze is possible; only escalation, settlement, or escape paths remain.
+    <main className="container page">
+      <div className="row spread" style={{ alignItems: "flex-end", marginBottom: 20 }}>
+        <div style={{ minWidth: 0 }}>
+          <a href="/deals" className="small">
+            ← My deals
+          </a>
+          <h1 style={{ margin: "6px 0 6px" }}>{title}</h1>
+          <div className="row" style={{ gap: 8 }}>
+            <Chip tone={stage.tone}>{stage.label}</Chip>
+            <span className="small muted">
+              {categoryLabel(terms?.category)}
+              {role ? ` · you are the ${role}` : ""}
+            </span>
           </div>
-        ) : null}
-        {phase === "DELIVERED" || phase === "SELF_RESOLUTION" ? (
-          <div style={warning}>
-            Inspection clock is running. The buyer&apos;s one free freeze is still available — freezing stops the
-            timeout path.
+        </div>
+        {terms ? (
+          <div style={{ textAlign: "right" }}>
+            <div className="amount amount-lg">{formatAmount(terms.principalUnits)}</div>
+            <div className="small muted">USDC</div>
           </div>
         ) : null}
       </div>
 
-      {view.dealId ? (
-        <DisputeProgress
-          dealId={view.dealId}
-          fundedAt={view.dealStatus?.fundedAt}
-          deliveredAt={view.dealStatus?.deliveredAt}
-          disputeOpenedAt={view.dealStatus?.disputeOpenedAt}
-          disputeUsed={view.dealStatus?.disputeUsed}
-        />
-      ) : null}
+      <ol className="stepper" aria-label="Deal progress" style={{ marginBottom: 20 }}>
+        {DEAL_STEPS.map((label, i) => (
+          <li key={label} data-state={states[i]} aria-current={states[i] === "current" ? "step" : undefined}>
+            {label}
+          </li>
+        ))}
+      </ol>
 
-      <div style={card}>
-        <h2>Progress</h2>
-        <ol>
-          {PROGRESS_STEPS.map((step, i) => (
-            <li key={step} style={{ fontWeight: i === current ? 700 : 400 }}>
-              {step}
-              {i === current ? " ← current" : ""}
-              {i < current ? " ✓" : ""}
-            </li>
-          ))}
-        </ol>
-      </div>
+      <div className="grid-2" style={{ alignItems: "start", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 340px), 1fr))" }}>
+        <div className="stack">
+          <section className="card" style={{ borderColor: action.cta ? "var(--primary)" : undefined }}>
+            <span className="eyebrow">{action.cta ? "Your next step" : "Status"}</span>
+            <p style={{ margin: "8px 0 14px", fontSize: 16 }}>{action.message}</p>
+            {!session ? (
+              <Button onClick={() => void connect().then(() => window.location.reload()).catch(() => undefined)}>
+                Sign in to act on this deal
+              </Button>
+            ) : action.cta ? (
+              <ButtonLink href={`${base}/${action.cta.path}`} size="lg">
+                {action.cta.label} <Icon name="arrow-right" size={16} />
+              </ButtonLink>
+            ) : null}
+            {view.dealStatus?.disputeUsed === true && chainPhase === "DELIVERED" ? (
+              <div style={{ marginTop: 12 }}>
+                <Callout tone="warning">The one free dispute for this deal has already been used.</Callout>
+              </div>
+            ) : null}
+          </section>
 
-      {terms ? (
-        <div style={card}>
-          <h2>Exact amounts & deadlines</h2>
-          <ul>
-            <li>
-              Deal ID: <span style={mono}>{terms.dealId}</span>
-            </li>
-            <li>
-              Buyer: <span style={mono}>{terms.buyer}</span>
-            </li>
-            <li>
-              Seller: <span style={mono}>{terms.seller}</span>
-            </li>
-            <li>
-              Principal: <Money units={terms.principalUnits} />
-            </li>
-            <li>
-              Quoted fee: <Money units={terms.quotedFeeUnits} /> (buyer share{" "}
-              {formatFeePct(Number(terms.buyerFeeBps) / 100)} of earned fee; prepaid{" "}
-              <Money units={terms.prepaidBuyerFeeUnits} />)
-            </li>
-            <li>
-              <strong>
-                Total funding: <Money units={terms.fundedUnits} />
-              </strong>
-            </li>
-            <li>Delivery: {Number(terms.deliverySeconds)}s · Inspection: {Number(terms.inspectionSeconds)}s</li>
-            <li>
-              Funding deadline: {formatUnixDate(terms.fundingDeadline)} (<Countdown targetUnix={terms.fundingDeadline} />)
-            </li>
-            <li>Category: {terms.category}</li>
-          </ul>
-          {view.quote ? (
-            <div style={ok}>
-              Full-release preview (S = P): buyer gets <Money units={view.quote.buyerClaim} />, seller gets{" "}
-              <Money units={view.quote.sellerClaim} />, earned fee <Money units={view.quote.earnedFee} /> (source:{" "}
-              {view.quote.source}).
+          {agreementText ? (
+            <Card title="Agreement">
+              <p style={{ whiteSpace: "pre-wrap", margin: 0 }}>{agreementText}</p>
+              <p className="small muted" style={{ marginTop: 10, marginBottom: 0 }}>
+                Both parties sign the hash of this text as part of the deal terms.
+              </p>
+            </Card>
+          ) : null}
+
+          {view.dealId && chainPhase ? (
+            <DisputeProgress
+              dealId={view.dealId}
+              fundedAt={view.dealStatus?.fundedAt}
+              deliveredAt={view.dealStatus?.deliveredAt}
+              disputeOpenedAt={view.dealStatus?.disputeOpenedAt}
+              disputeUsed={view.dealStatus?.disputeUsed}
+            />
+          ) : null}
+
+          {view.dealId && chainPhase ? (
+            <>
+              <MessagesThread dealId={view.dealId} />
+              <EvidenceSection dealId={view.dealId} />
+            </>
+          ) : (
+            <Card title="Messages & evidence">
+              <p className="small muted" style={{ margin: 0 }}>
+                Messages and evidence open once the buyer funds the escrow.
+              </p>
+            </Card>
+          )}
+        </div>
+
+        <div className="stack">
+          {terms ? (
+            <Card title="Money">
+              <KeyValues
+                rows={[
+                  { label: "Price", value: `${formatAmount(terms.principalUnits)} USDC` },
+                  { label: "Platform fee", value: `${formatAmount(terms.quotedFeeUnits)} USDC` },
+                  { label: "Buyer deposits", value: `${formatAmount(terms.fundedUnits)} USDC` },
+                  ...(view.quote
+                    ? [{ label: "Seller receives on release", value: `${formatAmount(view.quote.sellerClaim)} USDC`, total: true }]
+                    : []),
+                ]}
+              />
+            </Card>
+          ) : null}
+
+          {terms ? (
+            <Card title="Timeline">
+              <KeyValues
+                rows={[
+                  { label: "Delivery window", value: formatSpan(Number(terms.deliverySeconds)) },
+                  { label: "Inspection window", value: formatSpan(Number(terms.inspectionSeconds)) },
+                  ...(view.dealStatus?.fundedAt ? [{ label: "Funded", value: formatUnixDate(view.dealStatus.fundedAt) }] : []),
+                  ...(view.dealStatus?.deliveredAt ? [{ label: "Delivered", value: formatUnixDate(view.dealStatus.deliveredAt) }] : []),
+                  ...(view.dealStatus?.disputeOpenedAt
+                    ? [{ label: "Dispute opened", value: formatUnixDate(view.dealStatus.disputeOpenedAt) }]
+                    : []),
+                  ...(!chainPhase
+                    ? [{ label: "Must be funded within", value: <Countdown targetUnix={terms.fundingDeadline} /> }]
+                    : []),
+                ]}
+              />
+            </Card>
+          ) : null}
+
+          {terms ? (
+            <Card title="Parties">
+              <div className="stack" style={{ gap: 10 }}>
+                <Party label="Buyer" address={terms.buyer} you={role === "buyer"} />
+                <Party label="Seller" address={terms.seller} you={role === "seller"} />
+              </div>
+            </Card>
+          ) : null}
+
+          {view.dealId ? <FallbackNotice dealId={view.dealId} /> : null}
+
+          <details className="card">
+            <summary style={{ cursor: "pointer", fontWeight: 560 }}>Technical details</summary>
+            <div className="stack small" style={{ gap: 8, marginTop: 12 }}>
+              {view.draftId ? (
+                <div>
+                  Draft ID <span className="mono">{view.draftId}</span>
+                </div>
+              ) : null}
+              {view.dealId ? (
+                <div style={{ wordBreak: "break-all" }}>
+                  Deal ID <span className="mono">{view.dealId}</span>
+                </div>
+              ) : null}
+              <div>
+                Chain confirmation:{" "}
+                {view.confirmation ? <TxStatus level={view.confirmation.level} /> : "not yet on chain"}
+              </div>
+              <div className="muted">
+                Only what is included on chain counts. Pending transactions and off-chain signatures can still change.
+              </div>
             </div>
-          ) : null}
+          </details>
+        </div>
+      </div>
+
+      {session && action.cta ? (
+        <div className="action-bar">
+          <div className="container">
+            <ButtonLink href={`${base}/${action.cta.path}`} block size="lg">
+              {action.cta.label}
+            </ButtonLink>
+          </div>
         </div>
       ) : null}
-
-      <div style={card}>
-        <h2>Transaction status (pending vs included)</h2>
-        <ul>
-          <li>
-            Buyer signature: {view.signatures["buyer"] ? "collected (off-chain — not a chain transaction)" : "missing"}
-          </li>
-          <li>
-            Seller signature: {view.signatures["seller"] ? "collected (off-chain — not a chain transaction)" : "missing"}
-          </li>
-          <li>
-            Deal confirmation:{" "}
-            {view.confirmation ? <TxStatus level={view.confirmation.level} /> : "unknown (no RPC or not indexed)"}
-          </li>
-          {view.dealStatus?.fundedAt ? <li>Funded at: {formatUnixDate(view.dealStatus.fundedAt)}</li> : null}
-          {view.dealStatus?.deliveredAt ? <li>Delivered at: {formatUnixDate(view.dealStatus.deliveredAt)}</li> : null}
-          {view.dealStatus?.disputeOpenedAt ? (
-            <li>Dispute opened at: {formatUnixDate(view.dealStatus.disputeOpenedAt)}</li>
-          ) : null}
-        </ul>
-      </div>
-
-      {view.dealId ? <FallbackNotice dealId={view.dealId} /> : null}
-
-      {view.dealId ? (
-        <>
-          <EvidenceSection dealId={view.dealId} />
-          <MessagesThread dealId={view.dealId} />
-        </>
-      ) : (
-        <div style={card}>
-          <h2>Evidence & messages</h2>
-          <p style={{ fontSize: 14 }}>
-            Evidence and messages unlock once the deal has an on-chain deal ID (after funding is indexed).
-          </p>
-        </div>
-      )}
-
-      <div style={card}>
-        <h2>Next actions</h2>
-        <p style={nav}>
-          <a href={`/deals/${id}/review`} style={{ ...button, textDecoration: "none", display: "inline-block" }}>
-            Review & sign
-          </a>
-          <a href={`/deals/${id}/fund`} style={{ ...button, textDecoration: "none", display: "inline-block" }}>
-            Fund
-          </a>
-          <a
-            href={`/deals/${id}/deliver`}
-            style={{ ...button, textDecoration: "none", display: "inline-block" }}
-          >
-            Deliver
-          </a>
-          <a
-            href={`/deals/${id}/inspect`}
-            style={{ ...button, textDecoration: "none", display: "inline-block" }}
-          >
-            Inspect / dispute
-          </a>
-          <a href={`/deals/${id}/claim`} style={{ ...button, textDecoration: "none", display: "inline-block" }}>
-            Claim / recovery
-          </a>
-        </p>
-      </div>
     </main>
   );
 }

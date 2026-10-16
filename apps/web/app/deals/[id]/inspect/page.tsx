@@ -1,176 +1,240 @@
 "use client";
 
+// Inspect & settle. The buyer releases payment or opens the one free dispute;
+// the seller can refund voluntarily; during a dispute both sides can agree a
+// split (settlement proposals) while the dispute timeline runs.
+
 import { use, useState } from "react";
-import { relaySubmit, ApiError } from "../../../../lib/api";
-import { isHex32 } from "../../../../lib/deal";
+import type { Address, Hash } from "viem";
+import { relaySubmit } from "../../../../lib/api";
 import {
-  CHAIN_ID,
-  HUB_ADDRESS,
   encodeApproveSeller,
   encodeRefundBuyer,
   getAccount,
   randomBytes32,
   sendDirect,
+  signSettle,
   waitForInclusion,
 } from "../../../../lib/wallet";
+import { formatAmount, formatUnixDate } from "../../../../lib/money";
+import { friendlyError } from "../../../../lib/errors";
 import { useDeal } from "../../../components/useDeal";
+import { useSession } from "../../../components/useSession";
+import DealShell, { chainPhaseOf, roleOf } from "../../../components/DealShell";
+import Countdown from "../../../components/Countdown";
 import DisputeButton from "../../../components/DisputeButton";
+import DisputeProgress from "../../../components/DisputeProgress";
 import SettlementProposals from "../../../components/SettlementProposals";
-import FallbackNotice from "../../../components/FallbackNotice";
-import Money from "../../../components/Money";
-import { button, card, error, mono, nav, ok, page, secondaryButton, warning } from "../../../components/styles";
+import { Button, ButtonLink, Callout, Card } from "../../../components/ui";
 
-const ZERO_HASH = "0x0000000000000000000000000000000000000000000000000000000000000000";
+const ZERO_HASH = `0x${"0".repeat(64)}` as Hash;
+const DISPUTE_PHASES = new Set([
+  "SELF_RESOLUTION",
+  "AWAITING_ESCALATION",
+  "EVIDENCE",
+  "PRIMARY_REVIEW",
+  "FALLBACK_REVIEW",
+  "RULING_PENDING",
+  "DEADLOCK",
+]);
 
 export default function InspectPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params);
-  const rawId = decodeURIComponent(id);
-  const view = useDeal(rawId);
-  const [policyVersion, setPolicyVersion] = useState(ZERO_HASH);
-  const [working, setWorking] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const { id: rawId } = use(params);
+  const id = decodeURIComponent(rawId);
+  const view = useDeal(id);
+  const { session, ensureWallet } = useSession();
+  const [confirming, setConfirming] = useState<"approveSeller" | "refundBuyer" | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+
+  const role = roleOf(view, session?.wallet);
+  const phase = chainPhaseOf(view);
+  const terms = view.terms;
+  const digest = terms?.["agreementDigest"] as Hash | undefined;
+  const inspectionEnds =
+    view.dealStatus?.deliveredAt && terms ? Number(view.dealStatus.deliveredAt) + Number(terms.inspectionSeconds) : null;
 
   async function settle(kind: "approveSeller" | "refundBuyer", direct: boolean) {
-    setWorking(true);
-    setMessage(null);
+    setBusy(kind + (direct ? "-direct" : ""));
     setFailure(null);
     try {
-      if (!view.terms || !view.dealId) throw new Error("Terms not loaded");
-      if (!isHex32(policyVersion)) throw new Error("Terminal policy version must be bytes32");
-      const hub = (view.terms.hub ?? HUB_ADDRESS) as `0x${string}`;
-      const dealId = view.dealId as `0x${string}`;
+      if (!terms || !view.dealId || !digest) throw new Error("Deal data is incomplete. Reload the page.");
+      await ensureWallet();
+      const account = (await getAccount()) as Address;
+      const actor = (kind === "approveSeller" ? terms.buyer : terms.seller) as Address;
+      if (account.toLowerCase() !== actor.toLowerCase()) {
+        throw new Error(`Switch your wallet to the ${kind === "approveSeller" ? "buyer" : "seller"} address on this deal.`);
+      }
+      const hub = terms.hub as Address;
+      const dealId = view.dealId as Hash;
       const nonce = randomBytes32();
       const expiresAt = BigInt(Math.floor(Date.now() / 1_000) + 3_600);
       if (direct) {
-        // Self-sent settlement needs no signature (contract accepts msg.sender == actor with empty sig).
+        // Sent by the actor itself: the contract needs no signature.
         const data =
           kind === "approveSeller"
-            ? encodeApproveSeller(dealId, policyVersion as `0x${string}`, nonce, expiresAt, "0x")
-            : encodeRefundBuyer(dealId, policyVersion as `0x${string}`, nonce, expiresAt, "0x");
+            ? encodeApproveSeller(dealId, ZERO_HASH, nonce, expiresAt, "0x")
+            : encodeRefundBuyer(dealId, ZERO_HASH, nonce, expiresAt, "0x");
         const hash = await sendDirect(hub, data);
-        setMessage(`Direct ${kind} sent (${hash}) — pending until included.`);
         await waitForInclusion(hash);
-        setMessage(`Direct ${kind} included (${hash}). Payouts are now claimable.`);
       } else {
-        const account = await getAccount();
-        const key = `settle-${view.dealId.slice(0, 12)}-${Date.now()}`;
-        const res = await relaySubmit(key, kind, {
-          dealId: view.dealId,
-          terminalPolicyVersion: policyVersion,
+        const sig = await signSettle(kind, hub, Number(terms.chainId), {
+          dealId,
+          agreementDigest: digest,
+          actor,
+          terminalPolicyVersion: ZERO_HASH,
+          nonce,
+          expiresAt,
+        });
+        await relaySubmit(`${kind}-${dealId.slice(2, 14)}-${Date.now()}`, kind, {
+          dealId,
+          terminalPolicyVersion: ZERO_HASH,
           nonce,
           expiresAt: expiresAt.toString(),
-          submitter: account,
+          sig,
         });
-        setMessage(`Relay ${res.status} (key ${res.idempotencyKey}) — pending until included.`);
       }
+      setDone(
+        kind === "approveSeller"
+          ? "Payment released. The seller can now claim it."
+          : "Refund issued. The buyer can now claim it.",
+      );
+      setConfirming(null);
     } catch (e) {
-      setFailure(e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e));
+      setFailure(friendlyError(e));
     } finally {
-      setWorking(false);
+      setBusy(null);
     }
   }
 
-  if (view.loading) {
-    return (
-      <main style={page}>
-        <p>Loading inspection panel…</p>
-      </main>
-    );
-  }
-  if (!view.terms || !view.dealId) {
-    return (
-      <main style={page}>
-        <h1>Inspect</h1>
-        <div style={error}>{view.error ?? "Deal not loaded."}</div>
-        <p style={nav}>
-          <a href={`/deals/${id}`}>← Dashboard</a>
-        </p>
-      </main>
-    );
-  }
-  const exhausted = view.dealStatus?.disputeUsed === true;
+  const inDispute = phase !== null && DISPUTE_PHASES.has(phase);
+  const back = `/deals/${encodeURIComponent(id)}`;
 
   return (
-    <main style={page}>
-      <h1>Inspect (buyer)</h1>
-      <p style={nav}>
-        <a href={`/deals/${id}`}>← Dashboard</a>
-      </p>
+    <DealShell
+      id={id}
+      view={view}
+      title={inDispute ? "Dispute center" : role === "seller" ? "Inspection" : "Inspect & release"}
+    >
+      {done ? (
+        <Card>
+          <Callout tone="success">{done}</Callout>
+          <div style={{ marginTop: 12 }}>
+            <ButtonLink href={`${back}/claim`}>Go to payouts</ButtonLink>
+          </div>
+        </Card>
+      ) : !role ? (
+        <Callout tone="neutral">Sign in as the buyer or seller to act on this deal.</Callout>
+      ) : phase === null || phase === "AWAITING_DELIVERY" ? (
+        <Callout tone="info">Inspection starts once the seller marks the deal delivered.</Callout>
+      ) : phase === "SETTLED" ? (
+        <Card>
+          <Callout tone="success">This deal is settled.</Callout>
+          <div style={{ marginTop: 12 }}>
+            <ButtonLink href={`${back}/claim`}>Go to payouts</ButtonLink>
+          </div>
+        </Card>
+      ) : (
+        <>
+          {phase === "DELIVERED" && inspectionEnds ? (
+            <Callout tone={role === "buyer" ? "warning" : "info"}>
+              Inspection ends {formatUnixDate(inspectionEnds)} (<Countdown targetUnix={String(inspectionEnds)} />).{" "}
+              {role === "buyer"
+                ? "If you do nothing, payment releases to the seller automatically."
+                : "Payment releases to you automatically then, unless the buyer disputes."}
+            </Callout>
+          ) : null}
 
-      {view.quote ? (
-        <div style={card}>
-          <h2>Settlement economics</h2>
-          <ul>
-            <li>
-              Release (approve seller, S = P): seller <Money units={view.quote.sellerClaim} />, fee{" "}
-              <Money units={view.quote.earnedFee} />. Posted bonds refunded in full.
-            </li>
-            <li>Refund (seller refunds, S = 0): buyer recovers principal + all prepaid fee. Posted bonds refunded.</li>
-            <li>Doing nothing past inspection settles S = P automatically (full award to seller).</li>
-          </ul>
-        </div>
-      ) : null}
+          {inDispute && view.dealId ? (
+            <DisputeProgress
+              dealId={view.dealId}
+              fundedAt={view.dealStatus?.fundedAt}
+              deliveredAt={view.dealStatus?.deliveredAt}
+              disputeOpenedAt={view.dealStatus?.disputeOpenedAt}
+              disputeUsed={view.dealStatus?.disputeUsed}
+            />
+          ) : null}
 
-      <div style={card}>
-        <h2>Release / refund-settle</h2>
-        <p style={{ fontSize: 14 }}>
-          Terminal policy version (bytes32, from the signed policy set):
-        </p>
-        <input
-          value={policyVersion}
-          onChange={(e) => setPolicyVersion(e.target.value)}
-          style={{ width: "100%", padding: 8, boxSizing: "border-box" }}
-        />
-        <div>
-          <button type="button" style={button} disabled={working} onClick={() => void settle("approveSeller", false)}>
-            Relay: release to seller
-          </button>
-          <button type="button" style={secondaryButton} disabled={working} onClick={() => void settle("approveSeller", true)}>
-            Direct: release to seller
-          </button>
-        </div>
-        <div>
-          <button type="button" style={button} disabled={working} onClick={() => void settle("refundBuyer", false)}>
-            Relay: seller refund
-          </button>
-          <button type="button" style={secondaryButton} disabled={working} onClick={() => void settle("refundBuyer", true)}>
-            Direct: seller refund
-          </button>
-        </div>
-      </div>
+          {role === "buyer" ? (
+            <Card title="Happy with what you received?">
+              <p className="small muted">
+                Releasing pays the seller {terms ? formatAmount(view.quote?.sellerClaim ?? terms.principalUnits) : ""} USDC
+                now. This can&apos;t be undone.
+              </p>
+              {confirming === "approveSeller" ? (
+                <div className="row">
+                  <Button size="lg" disabled={busy !== null} onClick={() => void settle("approveSeller", false)}>
+                    {busy === "approveSeller" ? "Check your wallet…" : "Yes, release payment"}
+                  </Button>
+                  <Button variant="ghost" onClick={() => setConfirming(null)}>
+                    Cancel
+                  </Button>
+                </div>
+              ) : (
+                <div className="row">
+                  <Button size="lg" onClick={() => setConfirming("approveSeller")}>
+                    Release payment
+                  </Button>
+                  <Button variant="ghost" disabled={busy !== null} onClick={() => void settle("approveSeller", true)}>
+                    Release from my wallet
+                  </Button>
+                </div>
+              )}
+            </Card>
+          ) : (
+            <Card title="Want to cancel the deal?">
+              <p className="small muted">Refunding returns the buyer&apos;s full deposit. No fee is charged on refunds.</p>
+              {confirming === "refundBuyer" ? (
+                <div className="row">
+                  <Button variant="danger" disabled={busy !== null} onClick={() => void settle("refundBuyer", false)}>
+                    {busy === "refundBuyer" ? "Check your wallet…" : "Yes, refund the buyer"}
+                  </Button>
+                  <Button variant="ghost" onClick={() => setConfirming(null)}>
+                    Cancel
+                  </Button>
+                </div>
+              ) : (
+                <Button variant="secondary" onClick={() => setConfirming("refundBuyer")}>
+                  Refund the buyer
+                </Button>
+              )}
+            </Card>
+          )}
 
-      <SettlementProposals
-        dealId={view.dealId as `0x${string}`}
-        agreementDigest={(view.terms.agreementHash ?? view.dealId) as `0x${string}`}
-        hub={(view.terms.hub ?? HUB_ADDRESS) as `0x${string}`}
-        chainId={Number(view.terms.chainId ?? CHAIN_ID)}
-        principalUnits={view.terms.principalUnits}
-        quotedFeeUnits={view.terms.quotedFeeUnits}
-        buyerFeeBps={view.terms.buyerFeeBps === "0" ? 0 : view.terms.buyerFeeBps === "10000" ? 10000 : 5000}
-        phase={view.dealStatus?.phase ?? ""}
-        settlementNonce={view.dealStatus?.settlementNonce}
-      />
+          {role === "buyer" && phase === "DELIVERED" && view.dealId && terms && digest ? (
+            <Card title="Something wrong?">
+              {view.dealStatus?.disputeUsed ? (
+                <Callout tone="warning">You already used this deal&apos;s one free dispute.</Callout>
+              ) : (
+                <>
+                  <p className="small muted">
+                    Opening a dispute freezes the deal for free (once per deal). You and the seller then have 24 hours to
+                    agree; after that you can escalate to an independent panel with a 5 USDC bond.
+                  </p>
+                  <DisputeButton dealId={view.dealId as Hash} hub={terms.hub as Address} chainId={Number(terms.chainId)} agreementDigest={digest} />
+                </>
+              )}
+            </Card>
+          ) : null}
 
-      <div style={card}>
-        <h2>Dispute — freeze first</h2>
-        {exhausted ? (
-          <div style={warning}>No freeze left on this deal. Settle, escalate, or use escape paths instead.</div>
-        ) : (
-          <DisputeButton
-            dealId={view.dealId as `0x${string}`}
-            hub={(view.terms.hub ?? HUB_ADDRESS) as `0x${string}`}
-            chainId={Number(view.terms.chainId ?? CHAIN_ID)}
-            agreementDigest={(view.terms.agreementHash ?? ZERO_HASH) as `0x${string}`}
-          />
-        )}
-      </div>
+          {inDispute && view.dealId && terms && digest ? (
+            <SettlementProposals
+              dealId={view.dealId as Hash}
+              agreementDigest={digest}
+              hub={terms.hub as Address}
+              chainId={Number(terms.chainId)}
+              principalUnits={terms.principalUnits}
+              quotedFeeUnits={terms.quotedFeeUnits}
+              buyerFeeBps={terms.buyerFeeBps === "0" ? 0 : terms.buyerFeeBps === "10000" ? 10000 : 5000}
+              phase={phase ?? ""}
+              settlementNonce={view.dealStatus?.settlementNonce}
+            />
+          ) : null}
 
-      {message ? <div style={ok}>{message}</div> : null}
-      {failure ? <div style={error}>{failure}</div> : null}
-      <p style={mono}>Dispute status: {exhausted ? "USED (exhausted)" : "one free freeze available"}</p>
-
-      <FallbackNotice dealId={view.dealId} />
-    </main>
+          {failure ? <Callout tone="danger">{failure}</Callout> : null}
+        </>
+      )}
+    </DealShell>
   );
 }

@@ -201,6 +201,16 @@ export interface BundleAdmission {
   readonly granted: AdmissionStruct | null;
 }
 
+export interface BundlePayment3009 {
+  readonly from: Address;
+  readonly to: Address;
+  readonly value: bigint;
+  readonly validAfter: bigint;
+  readonly validBefore: bigint;
+  readonly paymentSalt: Hash;
+  readonly nonce: Hash;
+}
+
 export interface FundingBundle {
   readonly draftId: string;
   readonly dealId: Hash;
@@ -217,6 +227,8 @@ export interface FundingBundle {
   readonly allowance: BundleAllowanceParams;
   readonly readiness: BundleReadinessParams;
   readonly admission: BundleAdmission;
+  /** Gasless deposit params (EIP-3009); null for bundles from older APIs. */
+  readonly payment3009: BundlePayment3009 | null;
   readonly requiredSignatures: readonly ["buyer", "seller"];
   readonly relayActionTemplate: { readonly action: "fund"; readonly params: { readonly dealId: Hash } };
 }
@@ -484,6 +496,22 @@ export function parseFundingBundle(raw: unknown, draftId = ""): FundingBundle {
     granted: parseGrantedAdmission(admissionRaw["granted"]),
   };
 
+  let payment3009: BundlePayment3009 | null = null;
+  if (isRecord(data["payment3009"])) {
+    const raw3009 = data["payment3009"] as Record<string, unknown>;
+    payment3009 = {
+      from: asAddress(raw3009["from"], "payment3009.from"),
+      to: asAddress(raw3009["to"], "payment3009.to"),
+      value: toBigIntValue(raw3009["value"], "payment3009.value"),
+      validAfter: toBigIntValue(raw3009["validAfter"], "payment3009.validAfter"),
+      validBefore: toBigIntValue(raw3009["validBefore"], "payment3009.validBefore"),
+      paymentSalt: asHash(raw3009["paymentSalt"], "payment3009.paymentSalt"),
+      nonce: asHash(raw3009["nonce"], "payment3009.nonce"),
+    };
+    if (payment3009.to.toLowerCase() !== hub.toLowerCase()) throw new Error("Funding bundle: payment3009.to must be the hub");
+    if (payment3009.value.toString() !== fundedUnits) throw new Error("Funding bundle: payment3009.value must equal fundedUnits");
+  }
+
   const requiredSigs = data["requiredSignatures"];
   if (
     !Array.isArray(requiredSigs) ||
@@ -513,6 +541,7 @@ export function parseFundingBundle(raw: unknown, draftId = ""): FundingBundle {
     allowance,
     readiness,
     admission,
+    payment3009,
     requiredSignatures: ["buyer", "seller"],
     relayActionTemplate: {
       action: "fund",
@@ -567,6 +596,116 @@ export async function signDealTerms(
   );
 }
 
+// ---- Gasless deposit (EIP-3009 ReceiveWithAuthorization) ----
+
+export interface Payment3009Signature {
+  readonly v: number;
+  readonly r: Hash;
+  readonly s: Hash;
+}
+
+export interface TokenDomain {
+  readonly name: string;
+  readonly version: string;
+}
+
+const RECEIVE_WITH_AUTHORIZATION_FIELDS = [
+  { name: "from", type: "address" },
+  { name: "to", type: "address" },
+  { name: "value", type: "uint256" },
+  { name: "validAfter", type: "uint256" },
+  { name: "validBefore", type: "uint256" },
+  { name: "nonce", type: "bytes32" },
+] as const;
+
+const TOKEN_DOMAIN_ABI = [
+  {
+    type: "function",
+    name: "eip712Domain",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "fields", type: "bytes1" },
+      { name: "name", type: "string" },
+      { name: "version", type: "string" },
+      { name: "chainId", type: "uint256" },
+      { name: "verifyingContract", type: "address" },
+      { name: "salt", type: "bytes32" },
+      { name: "extensions", type: "uint256[]" },
+    ],
+  },
+  { type: "function", name: "name", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "string" }] },
+  { type: "function", name: "version", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "string" }] },
+] as const;
+
+/**
+ * The token's own EIP-712 domain: EIP-5267 eip712Domain() when available,
+ * else name() + version() (native USDC exposes both; Base mainnet USDC is
+ * "USD Coin" / "2"). Read from chain so the signature always matches the
+ * deployed token instead of a hard-coded name.
+ */
+export async function readTokenDomain(token: Address, deps: FundingDeps = {}): Promise<TokenDomain> {
+  const client = publicOf(deps);
+  if (typeof client.readContract !== "function") throw new Error("Funding: no public client to read the token domain");
+  try {
+    const domain = (await client.readContract({
+      address: token,
+      abi: TOKEN_DOMAIN_ABI,
+      functionName: "eip712Domain",
+      args: [],
+    })) as readonly unknown[];
+    if (typeof domain[1] === "string" && typeof domain[2] === "string") return { name: domain[1], version: domain[2] };
+  } catch {
+    // Not EIP-5267: fall back to name()/version().
+  }
+  const name = (await client.readContract({ address: token, abi: TOKEN_DOMAIN_ABI, functionName: "name", args: [] })) as string;
+  const version = (await client.readContract({ address: token, abi: TOKEN_DOMAIN_ABI, functionName: "version", args: [] })) as string;
+  return { name, version };
+}
+
+/** Split a 65-byte ECDSA signature into (v, r, s) for the 3009 v/r/s entrypoint. */
+export function splitSignature(signature: string): Payment3009Signature {
+  const hex = signature.startsWith("0x") ? signature.slice(2) : signature;
+  if (hex.length !== 130) {
+    throw new Error("Gasless deposits need a standard wallet signature. Use the approve path instead.");
+  }
+  let v = parseInt(hex.slice(128, 130), 16);
+  if (v < 27) v += 27;
+  return { r: `0x${hex.slice(0, 64)}` as Hash, s: `0x${hex.slice(64, 128)}` as Hash, v };
+}
+
+/**
+ * Sign USDC's ReceiveWithAuthorization for the bundle's exact deposit. Only
+ * the hub can redeem it (receive* requires msg.sender == to), only for this
+ * amount, and the nonce binds it to this deal's terms.
+ */
+export async function signPayment3009(
+  account: Address,
+  bundle: FundingBundle,
+  deps: FundingDeps & { readonly tokenDomain?: TokenDomain } = {},
+): Promise<Payment3009Signature> {
+  const p = bundle.payment3009;
+  if (!p) throw new Error("Funding: this deal has no gasless deposit parameters");
+  if (account.toLowerCase() !== p.from.toLowerCase()) throw new Error("Funding: only the buyer can authorize the deposit");
+  const domain = deps.tokenDomain ?? (await readTokenDomain(bundle.token, deps));
+  const client = walletOf(deps) as unknown as TypedDataSigner;
+  const signature = (await client.signTypedData({
+    account,
+    domain: { name: domain.name, version: domain.version, chainId: bundle.chainId, verifyingContract: bundle.token },
+    types: { ReceiveWithAuthorization: RECEIVE_WITH_AUTHORIZATION_FIELDS },
+    primaryType: "ReceiveWithAuthorization",
+    message: {
+      from: p.from,
+      to: p.to,
+      value: p.value,
+      validAfter: p.validAfter,
+      validBefore: p.validBefore,
+      nonce: p.nonce,
+    },
+  } as never)) as string;
+  return splitSignature(signature);
+}
+
 /** Sign the FundWithAllowance intent (direct approve + fund path). */
 export async function signAllowance(
   account: Address,
@@ -613,8 +752,10 @@ export async function signReadiness(
 export interface FundStructSignatures {
   readonly buyer: string;
   readonly seller: string;
-  /** Buyer FundWithAllowance signature (the allowance path is the only UI path). */
-  readonly allowance: string;
+  /** Buyer FundWithAllowance signature (allowance path). Unused with `payment`. */
+  readonly allowance?: string;
+  /** Buyer EIP-3009 ReceiveWithAuthorization signature (gasless path). */
+  readonly payment?: Payment3009Signature;
   /** Buyer ReadinessConsent signature. Required iff bundle.readiness.required. */
   readonly readiness?: string;
   /** Operator admission signature. Defaults to the bundle's granted admission. */
@@ -641,7 +782,9 @@ function assertSig(value: string | undefined, field: string): string {
  * ABSENT_SIGNATURE marks the ignored slot explicitly.
  */
 export function assembleStructs(bundle: FundingBundle, sigs: FundStructSignatures): RelayStructs {
-  const allowanceSig = assertSig(sigs.allowance, "allowance intent");
+  const gasless = sigs.payment !== undefined;
+  if (gasless && !bundle.payment3009) throw new Error("Funding: this deal has no gasless deposit parameters");
+  const allowanceSig = gasless ? ABSENT_SIGNATURE : assertSig(sigs.allowance, "allowance intent");
   const granted = bundle.admission.granted;
   if (!granted) throw new Error("Funding: operator-granted admission is missing");
   const admissionSig = sigs.admission ?? granted.signature;
@@ -661,13 +804,29 @@ export function assembleStructs(bundle: FundingBundle, sigs: FundStructSignature
     throw new Error("Funding: readiness consent signature is required for this deal");
   }
   return {
-    pay: zeroPayment(),
-    allowance: {
-      paymentSalt: bundle.allowance.paymentSalt,
-      nonce: bundle.allowance.nonce,
-      expiresAt: bundle.allowance.expiresAt,
-      signature: allowanceSig,
-    },
+    // Gasless: the hub pulls USDC with receiveWithAuthorization and ignores
+    // the allowance struct. Otherwise the allowance intent authorizes
+    // transferFrom and the payment struct is ignored.
+    pay:
+      gasless && bundle.payment3009 && sigs.payment
+        ? {
+            validAfter: bundle.payment3009.validAfter,
+            validBefore: bundle.payment3009.validBefore,
+            paymentSalt: bundle.payment3009.paymentSalt,
+            v: sigs.payment.v,
+            r: sigs.payment.r,
+            s: sigs.payment.s,
+            use3009: true,
+          }
+        : zeroPayment(),
+    allowance: gasless
+      ? { paymentSalt: ZERO_HASH, nonce: ZERO_HASH, expiresAt: 0n, signature: ABSENT_SIGNATURE }
+      : {
+          paymentSalt: bundle.allowance.paymentSalt,
+          nonce: bundle.allowance.nonce,
+          expiresAt: bundle.allowance.expiresAt,
+          signature: allowanceSig,
+        },
     admission: { ...granted, signature: admissionSig },
     readiness,
   };
@@ -850,8 +1009,8 @@ export async function fetchFundingStatus(draftId: string, deps: FundingDeps = {}
 // ---- Direct path: ensureChain -> optional approve -> fund() -> assert event ----
 
 async function requiresApproval(bundle: FundingBundle, owner: Address, deps: FundingDeps): Promise<boolean> {
-  // The UI only produces the allowance path (no EIP-3009 signing), so the
-  // buyer must approve the hub unless on-chain allowance already covers it.
+  // Allowance path only: the buyer must approve the hub unless on-chain
+  // allowance already covers it (the EIP-3009 path never needs approval).
   if (deps.allowanceSufficient === true) return false;
   if (deps.allowanceSufficient === false) return true;
   const client = deps.publicClient as PublicClientLike | undefined;
@@ -898,7 +1057,8 @@ export async function directFund(
   const publicClient = publicOf(deps);
 
   let approveTxHash: Hash | null = null;
-  if (await requiresApproval(bundle, payer, deps)) {
+  // A 3009 authorization moves the USDC itself: no approve transaction.
+  if (sigs.payment === undefined && (await requiresApproval(bundle, payer, deps))) {
     const approveData = buildApproveCalldata(bundle.hub, bundle.fundedUnits);
     const approveReceipt = await waitForReceipt(await wallet.sendTransaction({ account: payer, to: bundle.token, data: approveData }), {
       publicClient,

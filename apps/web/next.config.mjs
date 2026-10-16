@@ -28,9 +28,11 @@ const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
+  "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
   "connect-src 'self' https: wss:",
+  // WalletConnect domain verification runs in an iframe.
+  "frame-src https://verify.walletconnect.org https://verify.walletconnect.com",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",
