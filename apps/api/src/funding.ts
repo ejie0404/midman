@@ -24,6 +24,7 @@ import {
   fundWithAllowanceTypedData,
   fundingAdmissionTypedData,
   readinessConsentTypedData,
+  paymentNonce,
 } from "./chainActions.js";
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -31,6 +32,8 @@ const HEX_RE = /^0x[0-9a-fA-F]+$/;
 
 /** Allowance intent validity window (seconds from bundle build). */
 export const ALLOWANCE_WINDOW_SECONDS = 3_600;
+/** EIP-3009 authorization validity window (seconds from bundle build). */
+export const PAYMENT_3009_WINDOW_SECONDS = 3_600;
 /** P-11: readiness attestation is valid for 2h before funding. */
 export const READINESS_EXPIRY_SECONDS = 7_200;
 /** P-11: readiness is required for the <=3h pricing tier (delivery+inspection). */
@@ -88,6 +91,21 @@ export interface FundingBundle {
   readonly admission: {
     readonly note: string;
     readonly granted: Record<string, string> | null;
+  };
+  /**
+   * Gasless deposit (EIP-3009): the buyer signs USDC's ReceiveWithAuthorization
+   * for exactly `value`, to the hub, with the nonce fund() derives from
+   * (dealId, agreementDigest, paymentSalt). Only the hub can redeem it
+   * (receive* requires msg.sender == to), and only for this deal.
+   */
+  readonly payment3009: {
+    readonly from: Address;
+    readonly to: Address;
+    readonly value: string;
+    readonly validAfter: string;
+    readonly validBefore: string;
+    readonly paymentSalt: Hash;
+    readonly nonce: Hash;
   };
   readonly requiredSignatures: readonly ["buyer", "seller"];
   readonly relayActionTemplate: { readonly action: "fund"; readonly params: { readonly dealId: string } };
@@ -256,6 +274,15 @@ export async function buildFundingBundle(
     admission: {
       note: ADMISSION_POLICY_NOTE,
       granted,
+    },
+    payment3009: {
+      from: buyerAddress,
+      to: hub,
+      value: terms["fundedUnits"] ?? "0",
+      validAfter: "0",
+      validBefore: String(nowSeconds + PAYMENT_3009_WINDOW_SECONDS),
+      paymentSalt,
+      nonce: paymentNonce(fullTerms["dealId"]!, agreementDigest, paymentSalt),
     },
     requiredSignatures: ["buyer", "seller"] as const,
     relayActionTemplate: { action: "fund", params: { dealId: draft.dealId } },

@@ -103,8 +103,12 @@ before the audit, not after.
   release/refund sent no signature; the fund page posted DealTerms
   signatures in a shape the API rejects; the recovery package exported a
   zero digest and the wrong signatures.
-  Still open: gasless deposits (EIP-3009 `receiveWithAuthorization`, today
-  the buyer needs ETH for one `approve`), smart-wallet signatures on chain
+- **Gasless deposits (done):** the buyer signs USDC's
+  `ReceiveWithAuthorization` (token domain read from chain) and the relayer
+  funds with `use3009`; no ETH, no approve. The approve path remains as a
+  fallback for smart-contract wallets. Proven on anvil (buyer sends 0 txs)
+  and covered against real Base USDC by `Fork.t.sol`.
+  Still open: smart-wallet signatures on chain
   (ERC-1271 works for deployed wallets; ERC-6492 for undeployed ones and the
   USDC `bytes` 3009 overload need contract changes), deadline notifications.
 

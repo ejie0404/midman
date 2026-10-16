@@ -1,9 +1,10 @@
 "use client";
 
-// Fund the escrow, as a checklist the buyer works down:
+// Fund the escrow, as a checklist the buyer works down (gasless by default:
+// an EIP-3009 signature lets the hub pull the USDC, so no ETH is needed):
 //   1. both parties signed the terms (review page),
 //   2. funding approval from Midman (automated admission),
-//   3. enough USDC, and the escrow allowed to take it (ERC-20 approve),
+//   3. enough USDC (plus an ERC-20 approve on the fallback path only),
 //   4. sign the deposit authorization (+ readiness consent for <=3h deals),
 //   5. deposit: relayed (we pay the gas for fund()) or sent from the wallet.
 // Only the DealFunded event counts as funded; a relay acceptance does not.
@@ -18,10 +19,12 @@ import {
   directFund,
   fetchFundingBundle,
   signAllowance,
+  signPayment3009,
   signReadiness,
   submitRelayFund,
   waitForFundingEvent,
   type FundingBundle,
+  type Payment3009Signature,
 } from "../../../../lib/funding";
 import { formatAmount } from "../../../../lib/money";
 import { friendlyError } from "../../../../lib/errors";
@@ -80,6 +83,13 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
   const [balance, setBalance] = useState<bigint | null>(null);
   const [allowance, setAllowance] = useState<bigint | null>(null);
   const [depositSig, setDepositSig] = useState("");
+  // Gasless (EIP-3009) by default; the approve path is the fallback for
+  // wallets whose signatures the token's v/r/s entrypoint cannot verify.
+  const [method, setMethod] = useState<"gasless" | "approve">("gasless");
+  const [paymentSig, setPaymentSig] = useState<Payment3009Signature | null>(null);
+  // The bundle the deposit signatures were made against (fetched fresh at
+  // signing so the authorization window starts when the buyer signs).
+  const [signedBundle, setSignedBundle] = useState<FundingBundle | null>(null);
   const [readinessSig, setReadinessSig] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -141,10 +151,12 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
   const enoughUsdc = balance !== null && balance >= funded;
   const allowanceOk = allowance !== null && allowance >= funded;
   const readinessNeeded = bundle?.readiness.required === true;
-  const authorized = Boolean(depositSig) && (!readinessNeeded || Boolean(readinessSig));
+  const gasless = method === "gasless" && Boolean(bundle?.payment3009);
+  const authorized =
+    (gasless ? paymentSig !== null : Boolean(depositSig)) && (!readinessNeeded || Boolean(readinessSig)) && signedBundle !== null;
 
   const steps: StepState[] = (() => {
-    const done = [signed, approved, enoughUsdc && allowanceOk, authorized, Boolean(fundedTx)];
+    const done = [signed, approved, enoughUsdc && (gasless || allowanceOk), authorized, Boolean(fundedTx)];
     const firstOpen = done.findIndex((d) => !d);
     return done.map((d, i) => (d ? "done" : i === firstOpen ? "current" : "todo"));
   })();
@@ -168,9 +180,11 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
   }
 
   async function authorize() {
-    if (!bundle || !bundle.agreementDigest) throw new Error("Deal data is incomplete. Reload the page.");
+    if (!draftId) throw new Error("Deal data is incomplete. Reload the page.");
     await ensureWallet();
     const account = (await getAccount()) as Address;
+    const bundle = await fetchFundingBundle(draftId);
+    if (!bundle.agreementDigest) throw new Error("Deal data is incomplete. Reload the page.");
     const ctx = { chainId: bundle.chainId, hub: bundle.hub };
     if (readinessNeeded) {
       setReadinessSig(
@@ -188,6 +202,22 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
         ),
       );
     }
+    if (method === "gasless" && bundle.payment3009) {
+      try {
+        setPaymentSig(await signPayment3009(account, bundle));
+        setSignedBundle(bundle);
+        return;
+      } catch (e) {
+        // Smart-contract wallets can't produce the v/r/s signature USDC's
+        // gasless entrypoint checks: switch to the approve path.
+        if (e instanceof Error && /standard wallet signature/.test(e.message)) {
+          setMethod("approve");
+          throw new Error("Your wallet can't sign a gasless deposit. Use the approve option below instead.");
+        }
+        throw e;
+      }
+    }
+    setSignedBundle(bundle);
     setDepositSig(
       await signAllowance(
         account,
@@ -206,17 +236,18 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
   }
 
   function sigs() {
+    const b = signedBundle!;
     return {
-      buyer: bundle!.signatures.buyer ?? "",
-      seller: bundle!.signatures.seller ?? "",
-      allowance: depositSig,
+      buyer: b.signatures.buyer ?? "",
+      seller: b.signatures.seller ?? "",
+      ...(gasless && paymentSig ? { payment: paymentSig } : { allowance: depositSig }),
       ...(readinessSig ? { readiness: readinessSig } : {}),
     };
   }
 
   async function depositRelayed() {
     if (!bundle || !draftId) return;
-    await submitRelayFund(draftId, assembleRelayPayload(bundle, sigs()));
+    await submitRelayFund(draftId, assembleRelayPayload(signedBundle!, sigs()));
     setPendingNote("Submitted. Waiting for the deposit to land on Base (usually under a minute)…");
     const confirmed = await waitForFundingEvent(draftId, bundle.hub, bundle.dealId, { intervalMs: 5_000, timeoutMs: 300_000 });
     setPendingNote(null);
@@ -230,7 +261,7 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
     const wallet = getWalletClient();
     await ensureChainId(wallet as unknown as { getChainId(): Promise<number> }, bundle.chainId);
     setPendingNote("Confirm in your wallet, then wait for inclusion…");
-    const result = await directFund(bundle, sigs(), { account });
+    const result = await directFund(signedBundle!, sigs(), { account });
     setPendingNote(null);
     setFundedTx(result.fundTxHash);
   }
@@ -287,7 +318,7 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
                 Wallet balance: {balance === null ? "unknown" : `${formatAmount(balance)} USDC`}
                 {balance !== null && !enoughUsdc ? " — top up before continuing." : ""}
               </p>
-              {enoughUsdc && !allowanceOk ? (
+              {enoughUsdc && !gasless && !allowanceOk ? (
                 <>
                   <p className="small muted">
                     Allow the escrow contract to take exactly {formatAmount(bundle.fundedUnits)} USDC. This is a one-off
@@ -307,8 +338,23 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
               <p className="small muted">
                 {readinessNeeded
                   ? "Two signatures: confirm you're ready to inspect within 3 hours, then authorize this exact deposit."
-                  : "One signature authorizing this exact deposit for this deal only. No gas needed."}
+                  : gasless
+                    ? "One signature that lets the escrow take exactly this amount, for this deal only. No ETH or gas needed."
+                    : "One signature authorizing this exact deposit for this deal only."}
               </p>
+              {bundle.payment3009 ? (
+                <p className="small" style={{ marginTop: -4 }}>
+                  {gasless ? (
+                    <button type="button" className="btn btn-ghost btn-sm" style={{ paddingLeft: 0 }} onClick={() => { setMethod("approve"); setPaymentSig(null); setSignedBundle(null); }}>
+                      Using a smart-contract wallet? Use the approve option
+                    </button>
+                  ) : (
+                    <button type="button" className="btn btn-ghost btn-sm" style={{ paddingLeft: 0 }} onClick={() => { setMethod("gasless"); setDepositSig(""); setSignedBundle(null); }}>
+                      Switch back to the gasless deposit
+                    </button>
+                  )}
+                </p>
+              ) : null}
               <Button disabled={busy !== null} onClick={() => void run("authorize", authorize)}>
                 {busy === "authorize" ? "Check your wallet…" : "Sign authorization"}
               </Button>
