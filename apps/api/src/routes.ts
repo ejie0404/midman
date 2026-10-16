@@ -76,6 +76,22 @@ const asAddress = (value: string, field: string): Address => {
   return value as Address;
 };
 
+/**
+ * Terms plus `agreementDigest`: the EIP-712 DealTerms digest the hub stores as
+ * the deal's termsHash. Every party action signature (delivery, dispute,
+ * settlement) is bound to it, so clients must sign with this value, never
+ * with agreementHash (the hash of the agreement text).
+ */
+export function withAgreementDigest(terms: Record<string, string>): Record<string, string> {
+  const hub = terms["hub"];
+  if (!hub || !/^0x[0-9a-fA-F]{40}$/.test(hub)) return terms;
+  try {
+    return { ...terms, agreementDigest: buildFullTerms(terms as CanonicalTerms, hub as Address).agreementDigest };
+  } catch {
+    return terms;
+  }
+}
+
 const MAX_AGREEMENT_TEXT = 4_000;
 const MAX_TITLE = 120;
 
@@ -180,7 +196,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   app.get<{ Params: { id: string } }>("/drafts/:id/terms", async (request, reply) => {
     const draft = await deps.store.getDraft(request.params.id);
     if (!draft) return reply.code(404).send(bad("Draft not found"));
-    return { terms: draft.terms, signatures: draft.signatures, status: draft.status };
+    return { terms: withAgreementDigest(draft.terms), signatures: draft.signatures, status: draft.status };
   });
 
   app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/drafts/:id/signatures", async (request, reply) => {
@@ -296,7 +312,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       // returned as before. With guards registered, `request.session` is
       // always defined, so enforce party binding and never leak terms.
       if (request.session === undefined) {
-        return { dealId, source: "draft", status: draft.status, terms: draft.terms };
+        return { dealId, source: "draft", status: draft.status, terms: withAgreementDigest(draft.terms) };
       }
       const wallet = request.session?.wallet;
       let authorized = false;
@@ -307,7 +323,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
         else if ((draft.terms["seller"] ?? "").toLowerCase() === want && (draft.terms["seller"] ?? "") !== "") authorized = true;
         else if (deps.reader && deps.hub) authorized = (await dealParty(deps.store, deps.reader, deps.hub, dealId, wallet)) !== null;
       }
-      if (authorized) return { dealId, source: "draft", status: draft.status, terms: draft.terms };
+      if (authorized) return { dealId, source: "draft", status: draft.status, terms: withAgreementDigest(draft.terms) };
       return reply.code(403).send(bad("Deal contents require party authentication"));
     }
     if (events.length > 0) return { dealId, source: "projection", phase: "UNKNOWN", events: events.length };
@@ -353,11 +369,13 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       hub: deps.hub,
       usdc: deps.usdc,
       dealId: asHash(dealId, "dealId"),
-      agreementDigest: (draft?.terms["agreementDigest"] as `0x${string}` | undefined) ?? (zero as `0x${string}`),
+      agreementDigest: (draft ? (withAgreementDigest(draft.terms)["agreementDigest"] as `0x${string}` | undefined) : undefined) ?? (zero as `0x${string}`),
       canonicalTerms: draft?.terms ?? {},
+      // The DealTerms signatures the hub verifies at fund(); legacy acceptance
+      // signatures are a fallback for drafts signed before they existed.
       signatures: {
-        buyer: (draft?.signatures["buyer"] as `0x${string}` | undefined) ?? (zero as `0x${string}`),
-        seller: (draft?.signatures["seller"] as `0x${string}` | undefined) ?? (zero as `0x${string}`),
+        buyer: ((draft?.signatures["dealTerms:buyer"] ?? draft?.signatures["buyer"]) as `0x${string}` | undefined) ?? (zero as `0x${string}`),
+        seller: ((draft?.signatures["dealTerms:seller"] ?? draft?.signatures["seller"]) as `0x${string}` | undefined) ?? (zero as `0x${string}`),
       },
       policyIds: Object.fromEntries(Object.entries(draft?.terms ?? {}).filter(([k]) => k.startsWith("policy:"))),
       relevantTransactions: txs,

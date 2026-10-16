@@ -307,8 +307,13 @@ export async function storeDealSignature(
     throw httpError(400, "Signature does not recover to the expected party");
   }
 
+  const signatures = { ...draft.signatures, [`dealTerms:${role}`]: signature };
+  const bothSigned = Boolean(signatures["dealTerms:buyer"] && signatures["dealTerms:seller"]);
   await store.updateDraft(draftId, {
-    signatures: { ...draft.signatures, [`dealTerms:${role}`]: signature },
+    signatures,
+    // Both parties signed the full terms: ready for admission (an existing
+    // admission grant keeps its "admitted" status).
+    ...(bothSigned && draft.status !== "admitted" ? { status: "signed" } : {}),
   });
   return { ok: true, role, signer: recovered };
 }

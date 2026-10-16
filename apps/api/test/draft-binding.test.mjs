@@ -134,3 +134,15 @@ describe("agreement text", () => {
     assert.deepEqual(agreementFromBody({}, hash), { title: null, text: null });
   });
 });
+
+describe("agreement digest on terms", () => {
+  it("returns the EIP-712 terms digest the hub stores, not the agreement text hash", async () => {
+    const { withAgreementDigest } = await import("../dist/routes.js");
+    const { buildCanonicalTerms } = await import("../dist/terms.js");
+    const { buildFullTerms } = await import("../dist/fullTerms.js");
+    const terms = buildCanonicalTerms({ ...hostileTerms(), hub: HUB, token: USDC, chainId: 8453 }, 1_700_000_000);
+    const out = withAgreementDigest(terms);
+    assert.equal(out.agreementDigest, buildFullTerms(terms, HUB).agreementDigest);
+    assert.notEqual(out.agreementDigest, terms.agreementHash);
+  });
+});

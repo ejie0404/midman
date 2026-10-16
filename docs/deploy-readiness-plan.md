@@ -94,9 +94,19 @@ before the audit, not after.
   page with corrected copy, fee calculator and FAQ, "My deals" dashboard,
   three-step create-deal wizard (agreement text now stored and hash-checked),
   and a deal room with progress stepper and role-aware next-action card.
-  Still open: rebuild the review/fund/deliver/inspect/claim sub-pages on the
-  new components, wagmi + EIP-6963/WalletConnect/Coinbase Smart Wallet
-  (needs a WalletConnect project ID), human-readable revert errors.
+- **Phase 3 (second pass done):** multi-wallet picker (EIP-6963 discovery,
+  Coinbase Wallet, WalletConnect when `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`
+  is set) behind the existing viem helpers; human-readable error messages;
+  review/fund/deliver/inspect/claim rebuilt on the new components. Fixed on
+  the way: party action signatures used `agreementHash` instead of the terms
+  digest (delivery, dispute, settlement would revert `BadSig`); relayed
+  release/refund sent no signature; the fund page posted DealTerms
+  signatures in a shape the API rejects; the recovery package exported a
+  zero digest and the wrong signatures.
+  Still open: gasless deposits (EIP-3009 `receiveWithAuthorization`, today
+  the buyer needs ETH for one `approve`), smart-wallet signatures on chain
+  (ERC-1271 works for deployed wallets; ERC-6492 for undeployed ones and the
+  USDC `bytes` 3009 overload need contract changes), deadline notifications.
 
 ## Phases
 

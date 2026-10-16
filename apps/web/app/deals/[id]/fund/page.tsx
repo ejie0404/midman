@@ -1,594 +1,348 @@
 "use client";
 
+// Fund the escrow, as a checklist the buyer works down:
+//   1. both parties signed the terms (review page),
+//   2. funding approval from Midman (automated admission),
+//   3. enough USDC, and the escrow allowed to take it (ERC-20 approve),
+//   4. sign the deposit authorization (+ readiness consent for <=3h deals),
+//   5. deposit: relayed (we pay the gas for fund()) or sent from the wallet.
+// Only the DealFunded event counts as funded; a relay acceptance does not.
+
 import { use, useCallback, useEffect, useState } from "react";
-import { ApiError, requestAdmission } from "../../../../lib/api";
-import {
-  CHAIN_ID,
-  HUB_ADDRESS,
-  USDC_ADDRESS,
-  connectWallet,
-  ensureChainId,
-  getAccount,
-  getWalletClient,
-} from "../../../../lib/wallet";
+import { erc20Abi, type Address, type Hash } from "viem";
+import { requestAdmission } from "../../../../lib/api";
+import { ensureChainId, getAccount, getPublicClient, getWalletClient, sendDirect, waitForInclusion } from "../../../../lib/wallet";
 import {
   assembleRelayPayload,
+  buildApproveCalldata,
   directFund,
   fetchFundingBundle,
-  fetchFundingStatus,
   signAllowance,
-  signDealTerms,
   signReadiness,
-  submitDealSignatures,
   submitRelayFund,
   waitForFundingEvent,
   type FundingBundle,
 } from "../../../../lib/funding";
-import { formatUnixDate } from "../../../../lib/money";
+import { formatAmount } from "../../../../lib/money";
+import { friendlyError } from "../../../../lib/errors";
 import { useDeal } from "../../../components/useDeal";
-import Countdown from "../../../components/Countdown";
-import Money from "../../../components/Money";
-import FallbackNotice from "../../../components/FallbackNotice";
-import TxStatus from "../../../components/TxStatus";
-import { button, card, error, mono, nav, ok, page, secondaryButton, warning } from "../../../components/styles";
+import { useSession } from "../../../components/useSession";
+import DealShell, { chainPhaseOf, roleOf } from "../../../components/DealShell";
+import { Button, ButtonLink, Callout, Card, Chip, Icon } from "../../../components/ui";
 
-type Phase = "idle" | "working" | "pending-event" | "funded" | "failed";
+const EXPLORER = process.env["NEXT_PUBLIC_EXPLORER_URL"] ?? "https://basescan.org";
 
-function errText(e: unknown): string {
-  return e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
+type StepState = "done" | "current" | "todo";
+
+function Step({
+  n,
+  state,
+  title,
+  children,
+}: {
+  n: number;
+  state: StepState;
+  title: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <li style={{ display: "grid", gridTemplateColumns: "32px 1fr", gap: 12, padding: "14px 0", borderBottom: "1px solid var(--border)" }}>
+      <span
+        className="num-badge"
+        style={{
+          width: 28,
+          height: 28,
+          borderRadius: "50%",
+          display: "grid",
+          placeItems: "center",
+          fontSize: 13,
+          fontWeight: 600,
+          background: state === "done" ? "var(--success-soft)" : state === "current" ? "var(--primary)" : "var(--surface-2)",
+          color: state === "done" ? "var(--success)" : state === "current" ? "var(--on-primary)" : "var(--subtle)",
+        }}
+      >
+        {state === "done" ? <Icon name="check" size={14} /> : n}
+      </span>
+      <div style={{ opacity: state === "todo" ? 0.6 : 1 }}>
+        <div style={{ fontWeight: 600, marginTop: 3 }}>{title}</div>
+        {state === "current" && children ? <div style={{ marginTop: 10 }}>{children}</div> : null}
+      </div>
+    </li>
+  );
 }
 
 export default function FundPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params);
-  const rawId = decodeURIComponent(id);
-  const view = useDeal(rawId);
-
-  const [account, setAccount] = useState<string | null>(null);
+  const { id: rawId } = use(params);
+  const id = decodeURIComponent(rawId);
+  const view = useDeal(id);
+  const { session, ensureWallet } = useSession();
   const [bundle, setBundle] = useState<FundingBundle | null>(null);
-  const [bundleError, setBundleError] = useState<string | null>(null);
-  const [loadingBundle, setLoadingBundle] = useState(true);
-
-  const [buyerSig, setBuyerSig] = useState<string>("");
-  const [sellerSig, setSellerSig] = useState<string>("");
-  const [readinessSig, setReadinessSig] = useState<string>("");
-  const [allowanceSig, setAllowanceSig] = useState<string>("");
-  const [admissionJson, setAdmissionJson] = useState<string>("");
-
-  const [working, setWorking] = useState(false);
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [detail, setDetail] = useState<string>("");
+  const [balance, setBalance] = useState<bigint | null>(null);
+  const [allowance, setAllowance] = useState<bigint | null>(null);
+  const [depositSig, setDepositSig] = useState("");
+  const [readinessSig, setReadinessSig] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
-  const [txHash, setTxHash] = useState<string | null>(null);
-  const [approveTxHash, setApproveTxHash] = useState<string | null>(null);
+  const [fundedTx, setFundedTx] = useState<Hash | null>(null);
+  const [pendingNote, setPendingNote] = useState<string | null>(null);
 
-  const draftId = view.draftId ?? (rawId.startsWith("draft_") ? rawId : null);
+  const draftId = view.draftId ?? (id.startsWith("draft_") ? id : null);
+  const role = roleOf(view, session?.wallet);
+  const alreadyFunded = chainPhaseOf(view) !== null;
 
-  const loadBundle = useCallback(async (idToLoad: string) => {
-    setLoadingBundle(true);
-    setBundleError(null);
+  const loadBundle = useCallback(async () => {
+    if (!draftId || role !== "buyer") return;
     try {
-      const loaded = await fetchFundingBundle(idToLoad);
-      setBundle(loaded);
-      // The bundle carries signing params, never wallet signatures: prefill
-      // only the draft's recorded DealTerms signatures.
-      setBuyerSig(loaded.signatures.buyer ?? "");
-      setSellerSig(loaded.signatures.seller ?? "");
-      setReadinessSig("");
-      setAllowanceSig("");
+      setBundle(await fetchFundingBundle(draftId));
     } catch (e) {
-      setBundleError(errText(e));
-    } finally {
-      setLoadingBundle(false);
+      setFailure(friendlyError(e));
     }
-  }, []);
+  }, [draftId, role]);
+
+  const loadToken = useCallback(async () => {
+    if (!bundle || !session) return;
+    try {
+      const client = getPublicClient();
+      const owner = session.wallet as Address;
+      const [bal, allow] = await Promise.all([
+        client.readContract({ address: bundle.token, abi: erc20Abi, functionName: "balanceOf", args: [owner] }),
+        client.readContract({ address: bundle.token, abi: erc20Abi, functionName: "allowance", args: [owner, bundle.hub] }),
+      ]);
+      setBalance(bal);
+      setAllowance(allow);
+    } catch {
+      setBalance(null);
+      setAllowance(null);
+    }
+  }, [bundle, session]);
 
   useEffect(() => {
-    if (draftId) void loadBundle(draftId);
-  }, [draftId, loadBundle]);
+    void loadBundle();
+  }, [loadBundle]);
+  useEffect(() => {
+    void loadToken();
+  }, [loadToken]);
 
-  async function connect() {
+  async function run(label: string, action: () => Promise<void>) {
+    setBusy(label);
     setFailure(null);
     try {
-      const state = await connectWallet();
-      if (state.address) setAccount(state.address);
+      await action();
     } catch (e) {
-      setFailure(errText(e));
+      setFailure(friendlyError(e));
+    } finally {
+      setBusy(null);
     }
   }
 
-  async function requireAccount(): Promise<string> {
-    if (account) return account;
-    const addr = await getAccount();
-    setAccount(addr);
-    return addr;
+  const funded = bundle ? BigInt(bundle.fundedUnits) : 0n;
+  const signed = Boolean(bundle?.signatures.buyer && bundle?.signatures.seller);
+  const approved = Boolean(bundle?.admission.granted?.signature);
+  const enoughUsdc = balance !== null && balance >= funded;
+  const allowanceOk = allowance !== null && allowance >= funded;
+  const readinessNeeded = bundle?.readiness.required === true;
+  const authorized = Boolean(depositSig) && (!readinessNeeded || Boolean(readinessSig));
+
+  const steps: StepState[] = (() => {
+    const done = [signed, approved, enoughUsdc && allowanceOk, authorized, Boolean(fundedTx)];
+    const firstOpen = done.findIndex((d) => !d);
+    return done.map((d, i) => (d ? "done" : i === firstOpen ? "current" : "todo"));
+  })();
+
+  async function getApproval() {
+    if (!draftId) return;
+    await requestAdmission(draftId);
+    await loadBundle();
   }
 
-  function structSigs() {
-    if (!bundle) throw new Error("Funding bundle not loaded");
-    return {
-      buyer: buyerSig.trim(),
-      seller: sellerSig.trim(),
-      allowance: allowanceSig.trim(),
-      ...(readinessSig.trim() ? { readiness: readinessSig.trim() } : {}),
-    };
-  }
-
-  async function signAsBuyer() {
-    setFailure(null);
+  async function approveToken() {
     if (!bundle) return;
-    try {
-      const addr = await requireAccount();
-      const sig = await signDealTerms(addr as `0x${string}`, bundle.dealTermsTypedData);
-      setBuyerSig(sig);
-      setDetail(`Buyer DealTerms signature collected (${sig.slice(0, 12)}…). 32-field MidmanEscrow struct.`);
-    } catch (e) {
-      setFailure(errText(e));
-    }
+    await ensureWallet();
+    const wallet = getWalletClient();
+    await ensureChainId(wallet as unknown as { getChainId(): Promise<number> }, bundle.chainId);
+    const hash = await sendDirect(bundle.token, buildApproveCalldata(bundle.hub, bundle.fundedUnits));
+    setPendingNote("Waiting for the approval to be included…");
+    await waitForInclusion(hash);
+    setPendingNote(null);
+    await loadToken();
   }
 
-  async function signReadinessConsent() {
-    setFailure(null);
-    if (!bundle) return;
-    try {
-      const addr = await requireAccount();
-      if (!bundle.agreementDigest) throw new Error("Bundle is missing agreementDigest");
-      const sig = await signReadiness(
-        addr as `0x${string}`,
-        {
-          dealId: bundle.dealId,
-          agreementDigest: bundle.agreementDigest,
-          buyer: addr as `0x${string}`,
-          attestedAt: bundle.readiness.attestedAt,
-          nonce: bundle.readiness.nonce,
-          expiresAt: bundle.readiness.expiresAt,
-        },
-        { chainId: bundle.chainId, hub: bundle.hub },
+  async function authorize() {
+    if (!bundle || !bundle.agreementDigest) throw new Error("Deal data is incomplete. Reload the page.");
+    await ensureWallet();
+    const account = (await getAccount()) as Address;
+    const ctx = { chainId: bundle.chainId, hub: bundle.hub };
+    if (readinessNeeded) {
+      setReadinessSig(
+        await signReadiness(
+          account,
+          {
+            dealId: bundle.dealId,
+            agreementDigest: bundle.agreementDigest,
+            buyer: account,
+            attestedAt: bundle.readiness.attestedAt,
+            nonce: bundle.readiness.nonce,
+            expiresAt: bundle.readiness.expiresAt,
+          },
+          ctx,
+        ),
       );
-      setReadinessSig(sig);
-      setDetail("Readiness consent signed (buyer). Required before short-deadline funding.");
-    } catch (e) {
-      setFailure(errText(e));
     }
-  }
-
-  async function signAllowanceIntentLocal() {
-    setFailure(null);
-    if (!bundle) return;
-    try {
-      const addr = await requireAccount();
-      if (!bundle.agreementDigest) throw new Error("Bundle is missing agreementDigest");
-      const sig = await signAllowance(
-        addr as `0x${string}`,
+    setDepositSig(
+      await signAllowance(
+        account,
         {
           dealId: bundle.dealId,
           agreementDigest: bundle.agreementDigest,
-          payer: addr as `0x${string}`,
-          amount: BigInt(bundle.fundedUnits),
+          payer: account,
+          amount: funded,
           paymentSalt: bundle.allowance.paymentSalt,
           nonce: bundle.allowance.nonce,
           expiresAt: bundle.allowance.expiresAt,
         },
-        { chainId: bundle.chainId, hub: bundle.hub },
-      );
-      setAllowanceSig(sig);
-      setDetail("Allowance intent signed. The direct path can now approve + fund().");
-    } catch (e) {
-      setFailure(errText(e));
-    }
-  }
-
-  function effectiveSignatures(): { buyer: string; seller: string } {
-    return { buyer: buyerSig.trim(), seller: sellerSig.trim() };
-  }
-
-  function assertReady(): void {
-    const sigs = effectiveSignatures();
-    if (!sigs.buyer) throw new Error("Buyer DealTerms signature missing. Sign with the wallet first.");
-    if (!sigs.seller) throw new Error("Seller DealTerms signature missing. Paste the seller signature first.");
-    if (!bundle) throw new Error("Funding bundle not loaded");
-    if (!bundle.admission.granted || bundle.admission.granted.signature === "") {
-      throw new Error("Signed admission authorization is missing. Attach the operator-signed admission first.");
-    }
-    if (bundle.readiness.required === true && (readinessSig === "" || readinessSig === "0x")) {
-      throw new Error("This deal requires a readiness consent signature before funding.");
-    }
-    if (bundle.readiness.required === null) {
-      throw new Error("Readiness requirement is unknown for this draft. Refusing to fund.");
-    }
-    if (allowanceSig === "" || allowanceSig === "0x") {
-      throw new Error("Allowance intent signature missing. Sign the allowance intent first.");
-    }
-  }
-
-  async function submitSignatures() {
-    setFailure(null);
-    if (!draftId) return;
-    try {
-      const sigs = effectiveSignatures();
-      const payload: { buyer?: string; seller?: string } = {};
-      if (sigs.buyer) payload.buyer = sigs.buyer;
-      if (sigs.seller) payload.seller = sigs.seller;
-      await submitDealSignatures(draftId, payload);
-      setDetail("DealTerms signatures recorded on the draft.");
-    } catch (e) {
-      setFailure(errText(e));
-    }
-  }
-
-  async function relayFund() {
-    setFailure(null);
-    setDetail("");
-    setWorking(true);
-    setPhase("working");
-    try {
-      if (!draftId) throw new Error("Funding requires a draft id (draft_…)");
-      assertReady();
-      const addr = await requireAccount();
-      if (!bundle) throw new Error("Funding bundle not loaded");
-      const relayWallet = getWalletClient();
-      await ensureChainId(relayWallet as unknown as { getChainId(): Promise<number> }, bundle.chainId);
-      void addr;
-      const payload = assembleRelayPayload(bundle, structSigs());
-      const result = await submitRelayFund(draftId, payload);
-      setPhase("pending-event");
-      setDetail(
-        `Relay accepted (${result.status}). A relay acceptance is NOT inclusion — waiting for the relayer tx and the DealFunded event…`,
-      );
-      const confirmed = await waitForFundingEvent(draftId, bundle.hub, bundle.dealId, { intervalMs: 5_000, timeoutMs: 300_000 });
-      setTxHash(confirmed.txHash);
-      setPhase("funded");
-      setDetail(
-        `INCLUDED: tx ${confirmed.txHash} succeeded and emitted DealFunded(dealId=${String(
-          confirmed.event.args["dealId"],
-        )}). Funding is on-chain.`,
-      );
-    } catch (e) {
-      setPhase("failed");
-      setFailure(errText(e));
-    } finally {
-      setWorking(false);
-    }
-  }
-
-  async function fundDirect() {
-    setFailure(null);
-    setDetail("");
-    setWorking(true);
-    setPhase("working");
-    try {
-      if (!bundle) throw new Error("Funding bundle not loaded");
-      assertReady();
-      const addr = await requireAccount();
-      const wallet = getWalletClient();
-      await ensureChainId(wallet as unknown as { getChainId(): Promise<number> }, bundle.chainId);
-      setDetail("Submitting ERC20 approve, then fund() — approve alone is not funding.");
-      const result = await directFund(bundle, structSigs(), { account: addr as `0x${string}` });
-      setApproveTxHash(result.approveTxHash);
-      setTxHash(result.fundTxHash);
-      setPhase("funded");
-      setDetail(
-        `INCLUDED: fund() tx ${result.fundTxHash} succeeded and emitted DealFunded(dealId=${String(
-          result.event.args["dealId"],
-        )}).${result.approveTxHash ? ` (approve tx ${result.approveTxHash})` : ""}`,
-      );
-    } catch (e) {
-      setPhase("failed");
-      setFailure(errText(e));
-    } finally {
-      setWorking(false);
-    }
-  }
-
-  async function refreshStatus() {
-    if (!draftId) return;
-    try {
-      const status = await fetchFundingStatus(draftId);
-      setDetail(
-        `Funding status: ${status.status} · level ${status.level} · tx ${status.txHash ?? "(none)"}. ` +
-          "The event confirmation above is the only proof of funding.",
-      );
-    } catch (e) {
-      setFailure(errText(e));
-    }
-  }
-
-  if (view.loading && loadingBundle) {
-    return (
-      <main style={page}>
-        <p>Loading funding panel…</p>
-      </main>
+        ctx,
+      ),
     );
   }
 
-  const terms = view.terms;
-  const fundedUnits = bundle?.fundedUnits ?? terms?.fundedUnits ?? "0";
-  const prepaidUnits = bundle?.prepaidBuyerFeeUnits ?? terms?.prepaidBuyerFeeUnits ?? "0";
-  const chainId = bundle?.chainId ?? Number(terms?.chainId ?? CHAIN_ID);
-  const token = bundle?.token ?? (terms?.token as `0x${string}` | undefined) ?? USDC_ADDRESS;
-  const hub = bundle?.hub ?? ((terms?.hub as `0x${string}` | undefined) ?? HUB_ADDRESS);
-  const tokenOk = String(token).toLowerCase() === USDC_ADDRESS.toLowerCase();
-  const hubOk = String(HUB_ADDRESS) === "" || String(hub).toLowerCase() === String(HUB_ADDRESS).toLowerCase();
-  const chainOk = chainId === CHAIN_ID;
-  const bothSigned = Boolean(buyerSig.trim() && sellerSig.trim());
-  const admissionReady = Boolean(
-    bundle?.admission.granted &&
-      bundle.admission.granted.signature !== "" &&
-      bundle.admission.granted.signature !== "0x",
-  );
-  const readinessReady = bundle?.readiness.required !== true || Boolean(readinessSig);
-  const allowanceReady = Boolean(allowanceSig);
+  function sigs() {
+    return {
+      buyer: bundle!.signatures.buyer ?? "",
+      seller: bundle!.signatures.seller ?? "",
+      allowance: depositSig,
+      ...(readinessSig ? { readiness: readinessSig } : {}),
+    };
+  }
 
-  if (!draftId && !terms) {
+  async function depositRelayed() {
+    if (!bundle || !draftId) return;
+    await submitRelayFund(draftId, assembleRelayPayload(bundle, sigs()));
+    setPendingNote("Submitted. Waiting for the deposit to land on Base (usually under a minute)…");
+    const confirmed = await waitForFundingEvent(draftId, bundle.hub, bundle.dealId, { intervalMs: 5_000, timeoutMs: 300_000 });
+    setPendingNote(null);
+    setFundedTx(confirmed.txHash);
+  }
+
+  async function depositDirect() {
+    if (!bundle) return;
+    await ensureWallet();
+    const account = (await getAccount()) as Address;
+    const wallet = getWalletClient();
+    await ensureChainId(wallet as unknown as { getChainId(): Promise<number> }, bundle.chainId);
+    setPendingNote("Confirm in your wallet, then wait for inclusion…");
+    const result = await directFund(bundle, sigs(), { account });
+    setPendingNote(null);
+    setFundedTx(result.fundTxHash);
+  }
+
+  const back = `/deals/${encodeURIComponent(id)}`;
+
+  if (alreadyFunded || fundedTx) {
     return (
-      <main style={page}>
-        <h1>Fund</h1>
-        <div style={error}>{view.error ?? "Draft not loaded."}</div>
-        <p style={nav}>
-          <a href={`/deals/${id}`}>← Dashboard</a>
-        </p>
-      </main>
+      <DealShell id={id} view={view} title="Escrow funded">
+        <Card>
+          <Callout tone="success" title="Your deposit is in escrow">
+            The seller can now deliver. You&apos;ll inspect what you receive before any money is released.
+          </Callout>
+          {fundedTx ? (
+            <p className="small" style={{ marginTop: 12 }}>
+              <a href={`${EXPLORER}/tx/${fundedTx}`} target="_blank" rel="noreferrer">
+                View the transaction
+              </a>
+            </p>
+          ) : null}
+          <ButtonLink href={back}>Back to the deal</ButtonLink>
+        </Card>
+      </DealShell>
     );
   }
 
   return (
-    <main style={page}>
-      <h1>Fund</h1>
-      <p style={nav}>
-        <a href={`/deals/${id}`}>← Dashboard</a>
-      </p>
-
-      <div style={card}>
-        <h2>
-          Exact total: <Money units={fundedUnits} />
-        </h2>
-        <p>
-          Principal <Money units={bundle?.principalUnits ?? terms?.principalUnits ?? "0"} /> + buyer prepaid fee{" "}
-          <Money units={prepaidUnits} />. No partial funding: the buyer pays exactly this amount.
-        </p>
-        {terms?.fundingDeadline ? (
-          <p>
-            Funding deadline: {formatUnixDate(terms.fundingDeadline)} (<Countdown targetUnix={terms.fundingDeadline} />)
-          </p>
-        ) : null}
-        <p style={{ fontSize: 13 }}>
-          32-field MidmanEscrow <code>DealTerms</code> — both buyer and seller must sign this canonical struct, not the
-          legacy 5-field draft acceptance.
-        </p>
-      </div>
-
-      <div style={card}>
-        <h2>Wallet</h2>
-        {account ? (
-          <p>
-            Connected: <span style={mono}>{account}</span>
-          </p>
-        ) : (
-          <button type="button" style={button} onClick={() => void connect()}>
-            Connect wallet
-          </button>
-        )}
-      </div>
-
-      <div style={card}>
-        <h2>Network & token checks</h2>
-        <ul>
-          <li>
-            Deal chain ID: {chainId} {chainOk ? "✓ matches" : `⚠ expected ${CHAIN_ID}`}
-          </li>
-          <li>
-            Deal token: <span style={mono}>{String(token)}</span> {tokenOk ? "✓ matches USDC" : "⚠ DIFFERS from USDC"}
-          </li>
-          <li>
-            Deal hub: <span style={mono}>{String(hub)}</span> {hubOk ? "✓ matches configured hub" : "⚠ DIFFERS from configured hub"}
-          </li>
-        </ul>
-        {!chainOk || !tokenOk || !hubOk ? (
-          <div style={error}>Network/token/hub mismatch. Do NOT fund until the deployment is verified.</div>
-        ) : null}
-      </div>
-
-      {loadingBundle ? <div style={card}>Loading funding bundle…</div> : null}
-      {bundleError ? (
-        <div style={warning}>
-          Funding bundle unavailable: {bundleError}
-          <div style={{ marginTop: 8 }}>
-            <button type="button" style={secondaryButton} onClick={() => draftId && void loadBundle(draftId)}>
-              Retry bundle
-            </button>
-          </div>
-        </div>
-      ) : null}
-
-      {bundle ? (
-        <>
-          <div style={card}>
-            <h2>DealTerms signatures (required: buyer + seller)</h2>
-            <p style={{ fontSize: 14 }}>
-              Buyer signs with the connected wallet; the seller signature is pasted from the seller&apos;s session (or
-              collected via the relay endpoint). Both are required for <code>fund()</code>.
-            </p>
-            <button type="button" style={secondaryButton} onClick={() => void signAsBuyer()} disabled={!account}>
-              {buyerSig ? "Re-sign as buyer" : "Sign DealTerms as buyer"}
-            </button>
-            <button type="button" style={secondaryButton} onClick={() => void submitSignatures()} disabled={!draftId}>
-              Record signatures on draft
-            </button>
-            <p style={{ fontSize: 13 }}>
-              buyer: {buyerSig ? `✓ ${buyerSig.slice(0, 14)}…` : "✗"} · seller: {sellerSig ? "✓" : "✗"}
-            </p>
-            <label style={{ display: "block", fontSize: 14, marginTop: 8 }}>
-              Seller DealTerms signature
-              <textarea
-                value={sellerSig}
-                onChange={(e) => setSellerSig(e.target.value)}
-                placeholder="0x…"
-                style={{ width: "100%", minHeight: 60, padding: 8, boxSizing: "border-box" }}
-              />
-            </label>
-          </div>
-
-          {bundle.readiness.required === true ? (
-            <div style={warning}>
-              <strong>Readiness consent required (short-delivery deal).</strong> The hub rejects funding unless the
-              buyer&apos;s ReadinessConsent signature is attached.
-              <div style={{ marginTop: 8 }}>
-                <button
-                  type="button"
-                  style={secondaryButton}
-                  onClick={() => void signReadinessConsent()}
-                  disabled={!account || !bundle.readiness}
-                >
-                  {readinessSig ? "Re-sign readiness consent" : "Sign readiness consent"}
-                </button>
-                <span style={{ fontSize: 13, marginLeft: 8 }}>{readinessReady ? "✓ ready" : "✗ missing"}</span>
+    <DealShell
+      id={id}
+      view={view}
+      title="Fund the escrow"
+      subtitle={bundle ? `You'll deposit ${formatAmount(bundle.fundedUnits)} USDC. It stays in escrow until the deal completes.` : undefined}
+    >
+      {role !== "buyer" ? (
+        <Callout tone="neutral">{role === "seller" ? "Only the buyer funds this deal." : "Sign in as the buyer to fund this deal."}</Callout>
+      ) : !bundle ? (
+        failure ? <Callout tone="danger">{failure}</Callout> : <div className="skeleton" style={{ height: 240 }} />
+      ) : (
+        <Card>
+          <ol style={{ listStyle: "none", margin: 0, padding: 0 }}>
+            <Step n={1} state={steps[0]!} title="Both sides signed the terms">
+              <ButtonLink href={`${back}/review`} variant="secondary">
+                Go to signing
+              </ButtonLink>
+            </Step>
+            <Step n={2} state={steps[1]!} title="Funding approval from Midman">
+              <p className="small muted">A quick automatic check against deal limits. It can&apos;t move funds.</p>
+              <Button disabled={busy !== null} onClick={() => void run("approval", getApproval)}>
+                {busy === "approval" ? "Checking…" : "Get funding approval"}
+              </Button>
+            </Step>
+            <Step n={3} state={steps[2]!} title={`Have ${formatAmount(bundle.fundedUnits)} USDC ready`}>
+              <p className="small muted">
+                Wallet balance: {balance === null ? "unknown" : `${formatAmount(balance)} USDC`}
+                {balance !== null && !enoughUsdc ? " — top up before continuing." : ""}
+              </p>
+              {enoughUsdc && !allowanceOk ? (
+                <>
+                  <p className="small muted">
+                    Allow the escrow contract to take exactly {formatAmount(bundle.fundedUnits)} USDC. This is a one-off
+                    wallet transaction and needs a little ETH on Base for gas.
+                  </p>
+                  <Button disabled={busy !== null} onClick={() => void run("approve", approveToken)}>
+                    {busy === "approve" ? "Approving…" : "Allow USDC deposit"}
+                  </Button>
+                </>
+              ) : (
+                <Button variant="secondary" size="sm" disabled={busy !== null} onClick={() => void run("refresh", loadToken)}>
+                  Check again
+                </Button>
+              )}
+            </Step>
+            <Step n={4} state={steps[3]!} title="Authorize the deposit">
+              <p className="small muted">
+                {readinessNeeded
+                  ? "Two signatures: confirm you're ready to inspect within 3 hours, then authorize this exact deposit."
+                  : "One signature authorizing this exact deposit for this deal only. No gas needed."}
+              </p>
+              <Button disabled={busy !== null} onClick={() => void run("authorize", authorize)}>
+                {busy === "authorize" ? "Check your wallet…" : "Sign authorization"}
+              </Button>
+            </Step>
+            <Step n={5} state={steps[4]!} title="Deposit into escrow">
+              <div className="row">
+                <Button size="lg" disabled={busy !== null} onClick={() => void run("relay", depositRelayed)}>
+                  {busy === "relay" ? "Depositing…" : `Deposit ${formatAmount(bundle.fundedUnits)} USDC`}
+                </Button>
+                <Button variant="ghost" disabled={busy !== null} onClick={() => void run("direct", depositDirect)}>
+                  Send it from my wallet instead
+                </Button>
               </div>
+              <p className="small muted" style={{ marginTop: 8, marginBottom: 0 }}>
+                By default Midman submits the deposit for you and pays its gas.
+              </p>
+            </Step>
+          </ol>
+          {pendingNote ? (
+            <div style={{ marginTop: 12 }}>
+              <Callout tone="info">
+                <span className="row" style={{ gap: 8 }}>
+                  <Chip tone="info">Pending</Chip> {pendingNote}
+                </span>
+              </Callout>
             </div>
           ) : null}
-
-          <div style={card}>
-            <h2>Admission authorization</h2>
-            <p style={{ fontSize: 14 }}>
-              Every deal needs a funding approval from Midman before it can be funded. It is checked against deal limits and signed by the server; it cannot move funds.
-            </p>
-            {bundle.admission.granted ? (
-              <p style={mono}>
-                minPolicyId {bundle.admission.granted.minPolicyId.slice(0, 12)}… · nonce{" "}
-                {bundle.admission.granted.admissionNonce.slice(0, 12)}… · expires{" "}
-                {String(bundle.admission.granted.expiresAt)} · signature{" "}
-                {bundle.admission.granted.signature ? "✓ present" : "✗ missing"}
-              </p>
-            ) : (
-              <div style={warning}>No admission attached to this bundle yet.</div>
-            )}
-            <p style={{ fontSize: 13 }}>{bundle.admission.note}</p>
-            {!admissionReady ? (
-              <>
-                <button
-                  type="button"
-                  style={button}
-                  disabled={working || !bothSigned}
-                  onClick={() => {
-                    if (!draftId) return;
-                    setWorking(true);
-                    setFailure(null);
-                    requestAdmission(draftId)
-                      .then(() => loadBundle(draftId))
-                      .then(() => setDetail("Funding approved. You can fund the deal now."))
-                      .catch((e: unknown) => setFailure(errText(e)))
-                      .finally(() => setWorking(false));
-                  }}
-                >
-                  Get funding approval
-                </button>
-                {!bothSigned ? <p style={{ fontSize: 13 }}>Both parties must sign the deal terms first.</p> : null}
-                <details style={{ marginTop: 12 }}>
-                  <summary style={{ cursor: "pointer", fontSize: 13 }}>Operator: attach a manually signed admission</summary>
-                <textarea
-                  value={admissionJson}
-                  onChange={(e) => setAdmissionJson(e.target.value)}
-                  placeholder='{"minPolicyId":"0x…","admissionNonce":"0x…","expiresAt":"…","signature":"0x…"}'
-                  style={{ width: "100%", minHeight: 70, padding: 8, boxSizing: "border-box" }}
-                />
-                <button
-                  type="button"
-                  style={secondaryButton}
-                  onClick={() => {
-                    try {
-                      const parsed = JSON.parse(admissionJson) as Record<string, string>;
-                      setBundle({
-                        ...bundle,
-                        admission: {
-                          ...bundle.admission,
-                          granted: {
-                            minPolicyId: parsed.minPolicyId as `0x${string}`,
-                            admissionNonce: parsed.admissionNonce as `0x${string}`,
-                            expiresAt: BigInt(parsed.expiresAt),
-                            signature: parsed.signature,
-                          },
-                        },
-                      });
-                      setDetail("Admission authorization attached to the local bundle.");
-                    } catch (e) {
-                      setFailure(errText(e));
-                    }
-                  }}
-                >
-                  Attach admission
-                </button>
-                </details>
-              </>
-            ) : (
-              <span style={{ fontSize: 13 }}>✓ admission ready</span>
-            )}
-          </div>
-
-          <div style={card}>
-            <h2>Allowance intent</h2>
-            <p style={{ fontSize: 14 }}>
-              Both funding paths need a FundWithAllowance signature for the exact amount. Sign it with the buyer
-              wallet after connecting.
-            </p>
-            <button type="button" style={secondaryButton} onClick={() => void signAllowanceIntentLocal()} disabled={!account}>
-              {allowanceSig ? "Re-sign allowance intent" : "Sign allowance intent"}
-            </button>
-            <span style={{ fontSize: 13, marginLeft: 8 }}>{allowanceReady ? "✓ ready" : "✗ missing"}</span>
-          </div>
-
-          <div style={card}>
-            <h2>Submit funding</h2>
-            <p style={{ fontSize: 13 }}>
-              Both paths finish only after the exact transaction receipt succeeds AND the <code>DealFunded</code> event
-              for this dealId is confirmed.
-            </p>
-            <button type="button" style={button} disabled={working || !bothSigned || !admissionReady || !readinessReady} onClick={() => void relayFund()}>
-              {working && phase === "working" ? "Working…" : "Sponsored relay: fund"}
-            </button>
-            <button
-              type="button"
-              style={secondaryButton}
-              disabled={working || !bothSigned || !admissionReady || !readinessReady}
-              onClick={() => void fundDirect()}
-            >
-              Direct: approve + fund()
-            </button>
-            <button type="button" style={secondaryButton} onClick={() => void refreshStatus()}>
-              Refresh funding status
-            </button>
-            {!bothSigned ? <div style={warning}>Buyer and seller DealTerms signatures are required.</div> : null}
-            {!admissionReady ? <div style={warning}>Funding approval is required (Get funding approval above).</div> : null}
-            {!readinessReady ? <div style={warning}>Readiness consent signature is required.</div> : null}
-          </div>
-        </>
-      ) : null}
-
-      {phase === "pending-event" ? (
-        <div style={card}>
-          <p>
-            <TxStatus level="pending" txHash={txHash} />
-          </p>
-          <p style={{ fontSize: 13 }}>Relay accepted. Not funded until the DealFunded event is confirmed.</p>
-        </div>
-      ) : null}
-
-      {phase === "funded" ? (
-        <div style={ok}>
-          <p>
-            <strong>Funded — DealFunded confirmed.</strong> <TxStatus level="included" txHash={txHash} />
-          </p>
-          <p style={mono}>fund tx: {txHash}</p>
-          {approveTxHash ? <p style={mono}>approve tx: {approveTxHash}</p> : null}
-        </div>
-      ) : null}
-
-      {detail ? <p style={{ fontSize: 14 }}>{detail}</p> : null}
-      {failure ? <div style={error}>{failure}</div> : null}
-      {phase === "failed" ? (
-        <button type="button" style={secondaryButton} onClick={() => setPhase("idle")}>
-          Back
-        </button>
-      ) : null}
-
-      {view.dealId ? <FallbackNotice dealId={view.dealId} /> : null}
-    </main>
+          {failure ? (
+            <div style={{ marginTop: 12 }}>
+              <Callout tone="danger">{failure}</Callout>
+            </div>
+          ) : null}
+        </Card>
+      )}
+    </DealShell>
   );
 }

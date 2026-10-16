@@ -306,7 +306,7 @@ describe("wallet lifecycle", () => {
   });
 
   it("connectWallet rejects when no provider is available", async () => {
-    await assert.rejects(() => connectWallet(), /No browser wallet/);
+    await assert.rejects(() => connectWallet(), /No wallet selected/);
   });
 });
 

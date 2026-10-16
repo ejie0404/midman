@@ -34,6 +34,8 @@ Source of truth for the manifest copy is `deploy/manifest.example.json`
 | Dependency | Pinned version | Used by | Why | Update policy |
 |---|---|---|---|---|
 | viem | `2.9.0` | web, api, worker, `@midman/chain`, hash scripts | Typed chain access, ABI encoding, `keccak256` for policy/bytecode hashes | Security updates require re-review and a re-run of hashing + manifest verification so recorded hashes are unchanged. |
+| @walletconnect/ethereum-provider | `2.25.0` | web | WalletConnect v2 EIP-1193 provider (mobile wallets via QR/deep link); loaded on demand, only offered when `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` is set | Signs nothing itself; bump with a wallet smoke test. Pulls `zod` as a viem peer, which re-keys the viem install variant in the lockfile. |
+| @coinbase/wallet-sdk | `4.3.7` | web | Coinbase Wallet / Smart Wallet (passkeys) EIP-1193 provider; loaded on demand | Bump with a wallet smoke test (sign-in, DealTerms signature, deposit). |
 | next | `15.5.27` | `@midman/web` | Frontend framework/build | Patch updates via security review; major requires full user-journey re-acceptance. |
 | react | `19.3.0` | `@midman/web` | UI runtime | Pair with `next` upgrades only. |
 | react-dom | `19.3.0` | `@midman/web` | DOM renderer | Pair with `react`. |
