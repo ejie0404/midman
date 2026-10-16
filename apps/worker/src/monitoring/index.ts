@@ -15,6 +15,8 @@ export interface MonitoringPassOptions {
   readonly sink?: AlertSink;
   readonly deduper?: AlertDeduper;
   readonly thresholds?: MonitoringThresholds;
+  /** Alerts raised outside the snapshot (e.g. the outage keeper), deduped and delivered with the rest. */
+  readonly extraAlerts?: readonly Alert[];
 }
 
 export interface MonitoringPassResult {
@@ -48,7 +50,7 @@ export async function runMonitoringPass(
 ): Promise<MonitoringPassResult> {
   const snapshot = await collectMetrics(env, nowSeconds);
   const thresholds = opts.thresholds ?? thresholdsFromEnv();
-  const alerts = evaluate(snapshot, thresholds);
+  const alerts = [...evaluate(snapshot, thresholds), ...(opts.extraAlerts ?? [])];
 
   const deduper = opts.deduper ?? (defaultDeduper ??= new AlertDeduper());
   const { fresh, suppressed } = deduper.filter(alerts, nowSeconds);

@@ -66,9 +66,19 @@ Both `openDispute` (`now < effInspection`) and `finalizeAfterTimeout`
   `outageSaturated = true`.
 - `lastAuditedRound` — the **sequential coverage watermark**. A Chainlink uptime
   feed mints a round on every status transition (up→down or down→up), so round
-  ids are consecutive. The watermark is seeded at construction from the live head
-  and advanced ONLY by `reportOutage`, which must consume the next un-audited down
-  round (`roundId == lastAuditedRound + 1`) together with its recovery. An
+  ids are consecutive within a proxy phase. Proxy round ids are
+  `phaseId << 64 | aggregatorRound`, so an aggregator upgrade jumps to
+  `(phaseId + 1) << 64 | 1`; `successorRound(rid)` returns `rid + 1` when that
+  round exists, else the first round of the next phase. The watermark is seeded
+  from the live head (at construction and again by `executeFeed`, which refuses
+  to rotate away from a readable feed whose history is not fully audited) and
+  advanced ONLY by `reportOutage`, which must consume the next un-audited down
+  round (`successorRound(lastAuditedRound)`) together with its recovery
+  (`successorRound` of that round), or by the permissionless `advanceWatermark`,
+  which consumes the next round only when it reports UP (no downtime, so it can
+  never shorten a clock; this is how a phase that starts up is crossed). The
+  worker's outage keeper submits these calls and alerts
+  (`outage_watermark_behind`) when the watermark lags. An
   outage that recovered but was never reported therefore leaves the watermark
   behind the head, which is the on-chain proof that the retained ledger is
   incomplete. Before the watermark existed, deadline math ran over an
@@ -78,9 +88,10 @@ Both `openDispute` (`now < effInspection`) and `finalizeAfterTimeout`
 is `false` when (i) the clock's anchor precedes `prunedBefore`, (ii) the ledger
 is saturated, (iii) the fixpoint does not converge within `MAX_PASSES`,
 (iv) a required feed read for the live trailing interval is malformed, or
-(v) the coverage watermark is not synced to the feed head (an up head requires
-`lastAuditedRound == head`; a down head is the ongoing outage, covered by live
-trailing, and requires `lastAuditedRound == head - 1`). Missing or uncertain
+(v) the coverage watermark is not synced to the feed head
+(`watermarkCovers(head, up)`: an up head requires `lastAuditedRound == head`; a
+down head is the ongoing outage, covered by live trailing, and requires
+`successorRound(lastAuditedRound) == head`). Missing or uncertain
 history therefore surfaces as **UNKNOWN, never as a shorter deadline**. Timeout
 and settlement paths revert `OutageUnknown` until the (permissionless) transition
 reports make history complete; admission stays fail-open against the ORIGINAL

@@ -236,16 +236,12 @@ library HubDispute {
         // reportOutage. An up head requires the watermark to equal it; a down
         // head is the ongoing outage, covered by live trailing, and requires
         // only its predecessor to be audited. Any gap => UNKNOWN, never a
-        // shorter deadline.
+        // shorter deadline. Coverage follows proxy phase boundaries
+        // (MidmanPolicies.successorRound).
         {
             FeedStatus memory fs = readFeed(pol);
             if (!fs.ok) return (original, false);
-            uint80 la = pol.lastAuditedRound();
-            if (fs.up) {
-                if (la != fs.roundId) return (original, false);
-            } else if (la + 1 < fs.roundId) {
-                return (original, false);
-            }
+            if (!pol.watermarkCovers(fs.roundId, fs.up)) return (original, false);
         }
 
         uint256 n = pol.outageCount();

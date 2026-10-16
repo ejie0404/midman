@@ -123,13 +123,16 @@ contract MidmanPolicies {
 
     // ---- History coverage watermark (completeness proof) ----
     // Chainlink uptime feeds mint a round on EVERY status transition (up->down
-    // or down->up), so rounds are consecutive. `lastAuditedRound` is the highest
-    // feed round whose status has been consumed into the ledger: seeded at
-    // construction from the live head, then advanced only by reportOutage, which
-    // must consume the NEXT un-audited down round (roundId == lastAuditedRound+1)
-    // together with its recovery. An unreported transition therefore leaves the
-    // watermark behind the head, and deadline math reports history UNKNOWN rather
-    // than a deadline computed from an incomplete ledger.
+    // or down->up), so rounds are consecutive within a proxy phase. Proxy round
+    // ids are `phaseId << 64 | aggregatorRound`, so an aggregator upgrade jumps
+    // to the first round of the next phase; `successorRound` follows both.
+    // `lastAuditedRound` is the highest feed round whose status has been
+    // consumed into the ledger: seeded from the live head (construction and
+    // feed rotation), then advanced only by reportOutage (the next round is a
+    // down round, consumed with its recovery) or advanceWatermark (the next
+    // round is an up round, carrying no downtime). An unreported transition
+    // leaves the watermark behind the head, and deadline math reports history
+    // UNKNOWN rather than a deadline computed from an incomplete ledger.
     uint80 public lastAuditedRound;
 
     // ---- Events ----
@@ -149,6 +152,7 @@ contract MidmanPolicies {
     error NoPending();
     error TooEarly();
     error BadAddress();
+    error WatermarkBehind();
 
     modifier onlyGovernance() {
         require(msg.sender == governance, NotGovernance());
@@ -174,19 +178,21 @@ contract MidmanPolicies {
         sequencerFeed = sequencerFeed_;
         authEpoch = 1;
         _setPanel(1, primary_, fallback_, veto_);
-        // Seed the coverage watermark from the live feed head. A down head
-        // means the newest round is the ongoing outage; the prior round (its
-        // recovery boundary) is the last fully audited one. All history before
-        // the head is irrelevant: every deal anchor is >= deploy time.
-        {
-            (bool ok, bytes memory ret) =
-                sequencerFeed_.staticcall(abi.encodeWithSignature("latestRoundData()"));
-            require(ok && ret.length == 160, BadPanel());
-            (uint80 rid, int256 ans, uint256 st,, uint80 air) =
-                abi.decode(ret, (uint80, int256, uint256, uint256, uint80));
-            require(rid != 0 && air == rid && st != 0 && st <= block.timestamp, BadPanel());
-            lastAuditedRound = ans == 0 || rid == 0 ? rid : rid - 1;
-        }
+        // All history before the head is irrelevant: every deal anchor is >=
+        // deploy time.
+        lastAuditedRound = _seedWatermark(sequencerFeed_);
+    }
+
+    /// @notice Coverage watermark for a feed's live head. A down head means the
+    /// newest round is the ongoing outage; the prior round (its recovery
+    /// boundary) is the last fully audited one.
+    function _seedWatermark(address feed) internal view returns (uint80) {
+        (bool ok, bytes memory ret) = feed.staticcall(abi.encodeWithSignature("latestRoundData()"));
+        require(ok && ret.length == 160, BadPanel());
+        (uint80 rid, int256 ans, uint256 st,, uint80 air) =
+            abi.decode(ret, (uint80, int256, uint256, uint256, uint80));
+        require(rid != 0 && air == rid && st != 0 && st <= block.timestamp, BadPanel());
+        return ans == 0 ? rid : rid - 1;
     }
 
     /// @notice Panel admission rules (P-05/P-15): a required 5-member primary
@@ -377,8 +383,16 @@ contract MidmanPolicies {
         _propose(pendingFeed, "feed", v);
     }
 
+    /// @notice Rotating the feed reseeds the watermark from the NEW feed's head
+    /// (round ids are per-feed, so the old watermark is meaningless there).
+    /// While the old feed is still readable, every transition on it must be
+    /// audited first so its unreported outages are not silently dropped.
     function executeFeed() external onlyGovernance {
+        (bool readable, bool covered) = _headCovered();
+        require(!readable || covered, WatermarkBehind());
         sequencerFeed = _execute(pendingFeed, "feed", sequencerFeed);
+        lastAuditedRound = _seedWatermark(sequencerFeed);
+        emit OutageAudited(lastAuditedRound);
     }
 
     function transferGovernance(address next) external onlyGovernance {
@@ -401,20 +415,19 @@ contract MidmanPolicies {
         // Completeness: only the next un-audited transition may be consumed, so
         // a skipped/unreported outage leaves the watermark short of the head and
         // blocks deadline math instead of silently shortening a clock.
-        require(roundId == lastAuditedRound + 1, BadPanel());
+        (bool hasNext, uint80 expected) = successorRound(lastAuditedRound);
+        require(hasNext && roundId == expected, BadPanel());
         uint64 s;
         uint64 e;
+        uint80 recovery;
         {
-            (uint80 rid, int256 ans, uint256 st, uint256 upd, uint80 air) = _roundData(roundId);
-            require(rid == roundId && ans == 1, BadPanel());
-            require(st != 0 && st <= block.timestamp, BadPanel());
-            require(upd != 0 && upd <= block.timestamp, BadPanel());
-            require(air == rid, BadPanel());
-            (uint80 rid2, int256 ans2, uint256 st2, uint256 upd2, uint80 air2) = _roundData(roundId + 1);
-            require(rid2 == roundId + 1 && ans2 == 0, BadPanel());
-            require(st2 > st && st2 <= block.timestamp, BadPanel());
-            require(upd2 != 0 && upd2 <= block.timestamp, BadPanel());
-            require(air2 == rid2, BadPanel());
+            (bool okDown, int256 ans, uint256 st) = _roundView(roundId);
+            require(okDown && ans == 1, BadPanel());
+            bool hasRecovery;
+            (hasRecovery, recovery) = successorRound(roundId);
+            require(hasRecovery, BadPanel());
+            (bool okUp, int256 ans2, uint256 st2) = _roundView(recovery);
+            require(okUp && ans2 == 0 && st2 > st, BadPanel());
             s = uint64(st);
             e = uint64(st2);
         }
@@ -429,10 +442,69 @@ contract MidmanPolicies {
         outageTotal += 1;
         if (outageLedger.length > MAX_RETAINED) outageSaturated = true;
         // Consume the down round AND its recovery, keeping the watermark in step
-        // with the feed's consecutive round sequence.
-        lastAuditedRound = roundId + 1;
+        // with the feed's round sequence.
+        lastAuditedRound = recovery;
         emit OutageRecorded(s, e);
-        emit OutageAudited(roundId + 1);
+        emit OutageAudited(recovery);
+    }
+
+    /// @notice Consume the next un-audited round when it is an UP round. Up
+    /// rounds carry no downtime, so this never shortens a clock; it is how the
+    /// watermark crosses a proxy phase whose first round reports up.
+    function advanceWatermark() external {
+        (bool hasNext, uint80 next) = successorRound(lastAuditedRound);
+        require(hasNext, NoPending());
+        (, int256 ans,) = _roundView(next);
+        require(ans == 0, BadPanel());
+        lastAuditedRound = next;
+        emit OutageAudited(next);
+    }
+
+    /// @notice The feed round after `rid`: `rid + 1` in the same proxy phase,
+    /// else the first round of the next phase. exists=false at the head.
+    function successorRound(uint80 rid) public view returns (bool exists, uint80 next) {
+        (bool ok,,) = _roundView(rid + 1);
+        if (ok) return (true, rid + 1);
+        uint80 phase = rid >> 64;
+        if (phase == type(uint16).max) return (false, 0);
+        uint80 firstOfNext = ((phase + 1) << 64) | 1;
+        (ok,,) = _roundView(firstOfNext);
+        if (ok) return (true, firstOfNext);
+        return (false, 0);
+    }
+
+    /// @notice True when every transition up to `head` is audited. An up head
+    /// must be the watermark itself; a down head is the ongoing outage (covered
+    /// by the live trailing interval) and needs only its predecessor audited.
+    function watermarkCovers(uint80 head, bool headUp) public view returns (bool) {
+        uint80 la = lastAuditedRound;
+        if (headUp) return la == head;
+        if (la >= head) return true;
+        (bool hasNext, uint80 next) = successorRound(la);
+        return hasNext && next == head;
+    }
+
+    /// @notice Coverage of the configured feed's live head; readable=false when
+    /// the latest round is malformed.
+    function _headCovered() internal view returns (bool readable, bool covered) {
+        (bool ok, bytes memory ret) = sequencerFeed.staticcall(abi.encodeWithSignature("latestRoundData()"));
+        if (!ok || ret.length != 160) return (false, false);
+        (uint80 rid, int256 ans,,, uint80 air) = abi.decode(ret, (uint80, int256, uint256, uint256, uint80));
+        if (rid == 0 || air != rid) return (false, false);
+        return (true, watermarkCovers(rid, ans == 0));
+    }
+
+    /// @notice Strictly validated historical round; ok=false for a missing,
+    /// reverted, inconsistent or future-dated round.
+    function _roundView(uint80 rid) internal view returns (bool ok, int256 ans, uint256 startedAt) {
+        (bool success, bytes memory ret) =
+            sequencerFeed.staticcall(abi.encodeWithSignature("getRoundData(uint80)", rid));
+        if (!success || ret.length != 160) return (false, 0, 0);
+        (uint80 r, int256 a, uint256 st, uint256 upd, uint80 air) =
+            abi.decode(ret, (uint80, int256, uint256, uint256, uint80));
+        if (r != rid || air != rid || st == 0 || st > block.timestamp) return (false, 0, 0);
+        if (upd == 0 || upd > block.timestamp || (a != 0 && a != 1)) return (false, 0, 0);
+        return (true, a, st);
     }
 
     /// @notice Compact retained intervals: drop any whose end is strictly older
@@ -457,18 +529,6 @@ contract MidmanPolicies {
             for (uint256 j = len; j > write; j--) outageLedger.pop();
             prunedBefore = newPruned;
         }
-    }
-
-    function _roundData(uint80 roundId)
-        internal
-        view
-        returns (uint80, int256, uint256, uint256, uint80)
-    {
-        (bool ok, bytes memory ret) = sequencerFeed.staticcall(
-            abi.encodeWithSignature("getRoundData(uint80)", roundId)
-        );
-        require(ok && ret.length == 160, BadPanel());
-        return abi.decode(ret, (uint80, int256, uint256, uint256, uint80));
     }
 
     function outageCount() external view returns (uint256) {

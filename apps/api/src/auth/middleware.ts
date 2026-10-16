@@ -612,14 +612,17 @@ async function enforceDealStatus(req: FastifyRequest, deps: RouteDeps): Promise<
   throw httpError(401, "Authentication required to read deal contents");
 }
 
-/** Operators bypass; otherwise a party of a known deal is required. */
+/**
+ * Operators bypass; otherwise an authenticated party of a known deal is
+ * required. Fail-closed: a missing dealId, an unknown deal, or a wallet that
+ * is not a party is denied. There are no legacy/unauthenticated paths — the
+ * relay queue is a scarce operational resource (worker time, RPC calls).
+ */
 async function enforceRelaySubmit(req: FastifyRequest, deps: RouteDeps): Promise<void> {
   if (await isOperatorRequest(req, ["relay", "governance"])) return;
   const body = (req.body ?? {}) as { params?: { dealId?: unknown } };
   const dealId = typeof body.params?.dealId === "string" ? body.params.dealId : "";
-  if (!dealId) return; // non-deal relay job (legacy)
-  const draft = await deps.store.getDraftByDeal(dealId);
-  if (!draft && !(deps.reader && deps.hub)) return; // unknown deal (legacy tolerance)
+  if (!dealId) throw httpError(400, "Relay submission requires params.dealId");
   const session = requireAuth(req);
   if (await isParty(deps, dealId, session.wallet)) return;
   throw httpError(403, "Wallet is not a party to this deal's relay job");

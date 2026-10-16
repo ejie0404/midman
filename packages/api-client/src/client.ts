@@ -47,6 +47,7 @@ import {
   validateMessagesList,
   validateQueueRulingResult,
   validateReadinessPayload,
+  validateReadinessResponse,
   validateRecuseResult,
   validateRecoveryPackage,
   validateRelayJob,
@@ -90,6 +91,7 @@ import {
   type MessagesList,
   type QueueRulingResult,
   type ReadinessPayload,
+  type ReadinessResponse,
   type RecuseResult,
   type RecoveryPackage,
   type RelayJob,
@@ -575,6 +577,10 @@ export class MidmanClient {
   health(): Promise<HealthResponse> {
     return this.get("/health", validateHealthResponse);
   }
+
+  ready(): Promise<ReadinessResponse> {
+    return this.get("/health/ready", validateReadinessResponse);
+  }
 }
 
 /**
@@ -624,6 +630,7 @@ export type {
   MessagesList,
   QueueRulingResult,
   ReadinessPayload,
+  ReadinessResponse,
   RecuseResult,
   RecoveryPackage,
   RelayJob,

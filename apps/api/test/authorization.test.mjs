@@ -662,4 +662,27 @@ describe("relay submit binding", () => {
     assert.equal(relayRes.statusCode, 200, JSON.stringify(relayRes.json()));
     await app.close();
   });
+
+  it("fails closed: missing dealId is 400, unknown deal is 403 (no legacy paths)", async () => {
+    const { app, store } = makeApp();
+    await seedDraft(store, { id: "d_relay_closed", dealId: DEAL });
+
+    const noDealId = await authedCall(app, buyer, "POST", "/relay/submit", {
+      idempotencyKey: "rk-closed-1",
+      action: "openDispute",
+      params: {},
+    });
+    assert.equal(noDealId.statusCode, 400);
+
+    const unknownDeal = await authedCall(app, buyer, "POST", "/relay/submit", {
+      idempotencyKey: "rk-closed-2",
+      action: "openDispute",
+      params: { dealId: `0x${"ff".repeat(32)}` },
+    });
+    assert.equal(unknownDeal.statusCode, 403);
+
+    // Nothing was enqueued by the denied submissions.
+    assert.equal((await store.listQueuedRelay("relay", 10)).length, 0);
+    await app.close();
+  });
 });

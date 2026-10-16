@@ -1,9 +1,9 @@
 import { pathToFileURL } from "node:url";
 import Fastify from "fastify";
 import { closeStore, createRegistry, hasAuthStateStore, hasKvStore, migrateStore } from "@midman/store";
-import { loadConfig } from "./config.js";
+import { loadConfig, type AppConfig } from "./config.js";
 import { createStoreFromEnv, type Store } from "./db.js";
-import { buildDeps, registerRoutes } from "./routes.js";
+import { buildDeps, registerRoutes, type RouteDeps } from "./routes.js";
 import { registerDealMetaRoutes } from "./dealsMeta.js";
 import { registerEvidenceRoutes } from "./evidence/routes.js";
 import { registerAuthGuards, registerAuthRoutes } from "./auth/middleware.js";
@@ -95,7 +95,45 @@ export function buildServer(options: ServerOptions = {}) {
     hub: deps.hub,
   }));
 
+  // Liveness: the process is running. Readiness (below) decides traffic.
+  app.get("/health/live", async () => ({ ok: true }));
+
+  // Readiness: safe to receive production traffic. 200 only when every
+  // critical dependency is configured; otherwise 503 with the missing list
+  // so orchestrators route around this instance.
+  app.get("/health/ready", async (_req, reply) => {
+    const readiness = checkReadiness(deps, config);
+    if (!readiness.ready) return reply.code(503).send(readiness);
+    return readiness;
+  });
+
   return app;
+}
+
+/**
+ * Production readiness: database (production only — dev memory store is an
+ * explicit local choice), chain id, RPC providers, hub, and malware
+ * scanning (a real scanner or the explicit EVIDENCE_ALLOW_DEFERRED=1
+ * development opt-in, never set in production).
+ */
+export function checkReadiness(
+  deps: Pick<RouteDeps, "hub">,
+  config: Pick<AppConfig, "databaseUrl" | "chainId" | "rpcUrls">,
+): { ready: boolean; missing: string[]; checks: Record<string, boolean> } {
+  const production = process.env["NODE_ENV"] === "production";
+  const checks: Record<string, boolean> = {
+    database: production ? config.databaseUrl !== null : true,
+    chainId:
+      typeof config.chainId === "number" && Number.isInteger(config.chainId) && (config.chainId as number) > 0,
+    rpc: config.rpcUrls.length > 0,
+    hub: deps.hub !== null,
+    scanner:
+      (process.env["CLAMAV_HOST"] ?? "").trim() !== "" || process.env["EVIDENCE_ALLOW_DEFERRED"] === "1",
+  };
+  const missing = Object.entries(checks)
+    .filter(([, ok]) => !ok)
+    .map(([name]) => name);
+  return { ready: missing.length === 0, missing, checks };
 }
 
 /**

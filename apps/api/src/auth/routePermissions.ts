@@ -48,6 +48,8 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RoutePermission>> = Obje
   "POST /auth/logout": { access: "public", note: "clears/revokes the caller's own session" },
   "GET /auth/session": { access: "public", note: "session introspection" },
   "GET /health": { access: "public", note: "liveness probe" },
+  "GET /health/live": { access: "public", note: "liveness probe" },
+  "GET /health/ready": { access: "public", note: "readiness probe (200 only when safe for traffic)" },
   "GET /config/deal-defaults": {
     access: "public",
     note: "deployment-derived public policy binding; contains no private data",

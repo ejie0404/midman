@@ -115,6 +115,13 @@ export const MIDMAN_POLICIES_ABI = [
   },
   {
     "type": "function",
+    "name": "advanceWatermark",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "arbitrationPolicies",
     "inputs": [
       {
@@ -1010,6 +1017,30 @@ export const MIDMAN_POLICIES_ABI = [
   },
   {
     "type": "function",
+    "name": "successorRound",
+    "inputs": [
+      {
+        "name": "rid",
+        "type": "uint80",
+        "internalType": "uint80"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "exists",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "next",
+        "type": "uint80",
+        "internalType": "uint80"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "transferGovernance",
     "inputs": [
       {
@@ -1049,6 +1080,30 @@ export const MIDMAN_POLICIES_ABI = [
         "name": "",
         "type": "address",
         "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "watermarkCovers",
+    "inputs": [
+      {
+        "name": "head",
+        "type": "uint80",
+        "internalType": "uint80"
+      },
+      {
+        "name": "headUp",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "stateMutability": "view"
@@ -1220,6 +1275,11 @@ export const MIDMAN_POLICIES_ABI = [
   {
     "type": "error",
     "name": "TooEarly",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "WatermarkBehind",
     "inputs": []
   }
 ] as const;

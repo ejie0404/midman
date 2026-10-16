@@ -518,10 +518,19 @@ describe("operator routes require session AND signed request", () => {
 
 describe("relay status redaction", () => {
   async function submitRelay(app) {
+    // Fail-closed relay auth: submit with the relay operator session + signed
+    // request (the legacy unauthenticated path is gone).
+    const { cookie } = await signIn(app, relayOperator);
+    const payload = { idempotencyKey: "k1", action: "openDispute", params: { dealId: "0x01", secret: "s3cr3t" } };
     const res = await app.inject({
       method: "POST",
       url: "/relay/submit",
-      payload: { idempotencyKey: "k1", action: "openDispute", params: { dealId: "0x01", secret: "s3cr3t" } },
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        ...(await signedHeaders(relayOperator, "POST", "/relay/submit", Buffer.from(JSON.stringify(payload)))),
+      },
+      payload,
     });
     assert.equal(res.statusCode, 200);
   }

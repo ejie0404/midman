@@ -122,6 +122,23 @@ contract MockFeed {
         latestStartedAt = startedAt;
     }
 
+    /// @notice Write one round (any id, e.g. a new proxy phase `phase << 64 | n`).
+    function setRound(uint80 r, int256 ans, uint256 startedAt) external {
+        rounds[r] = Round({ans: ans, startedAt: startedAt});
+    }
+
+    /// @notice Delete a round so getRoundData reports it as missing.
+    function clearRound(uint80 r) external {
+        delete rounds[r];
+    }
+
+    /// @notice Make an existing round the live head.
+    function setHead(uint80 r) external {
+        roundId = r;
+        answer = rounds[r].ans;
+        latestStartedAt = rounds[r].startedAt;
+    }
+
     /// @notice Flip the live answer (ongoing-outage vs healthy).
     function setDown(bool down) external {
         answer = down ? int256(1) : int256(0);
