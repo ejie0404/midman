@@ -3,7 +3,7 @@
 // Contract state is authoritative; projections are labeled as such.
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import type { Address, Hash } from "viem";
+import { keccak256, stringToHex, type Address, type Hash } from "viem";
 import { createViemReader, buildRecoveryPackage, confirmationLevel, PHASE_NAMES, type ChainReader } from "@midman/chain";
 import { auditLog } from "./audit.js";
 import { hashInvitationToken, newInvitationToken } from "./invitations.js";
@@ -76,6 +76,36 @@ const asAddress = (value: string, field: string): Address => {
   return value as Address;
 };
 
+const MAX_AGREEMENT_TEXT = 4_000;
+const MAX_TITLE = 120;
+
+/** Validate the optional agreement title/text against the signed agreementHash. */
+export function agreementFromBody(
+  body: Record<string, unknown>,
+  agreementHash: string,
+): { title: string | null; text: string | null } | { error: string } {
+  const rawTitle = body["title"];
+  const rawText = body["agreementText"];
+  let title: string | null = null;
+  let text: string | null = null;
+  if (rawTitle !== undefined) {
+    if (typeof rawTitle !== "string" || rawTitle.trim().length === 0 || rawTitle.length > MAX_TITLE) {
+      return { error: `title must be 1-${MAX_TITLE} characters` };
+    }
+    title = rawTitle.trim();
+  }
+  if (rawText !== undefined) {
+    if (typeof rawText !== "string" || rawText.length === 0 || rawText.length > MAX_AGREEMENT_TEXT) {
+      return { error: `agreementText must be 1-${MAX_AGREEMENT_TEXT} characters` };
+    }
+    if (keccak256(stringToHex(rawText)).toLowerCase() !== agreementHash.toLowerCase()) {
+      return { error: "agreementText does not match agreementHash" };
+    }
+    text = rawText;
+  }
+  return { title, text };
+}
+
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   const bad = (message: string): { error: string } => ({ error: message });
 
@@ -89,6 +119,13 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       if (!binding.ok) return reply.code(503).send(bad(binding.error));
       const nowSeconds = Math.floor(Date.now() / 1_000);
       const terms = buildCanonicalTerms(binding.input, nowSeconds);
+      // Optional human-readable agreement (title + text). The signed terms
+      // only carry its hash, so the text is accepted only when it hashes to
+      // exactly that agreementHash; it is private draft data (parties only).
+      const agreement = agreementFromBody(body, terms["agreementHash"] ?? "");
+      if ("error" in agreement) return reply.code(400).send(bad(agreement.error));
+      if (agreement.text !== null) (terms as Record<string, string>)["agreementText"] = agreement.text;
+      if (agreement.title !== null) (terms as Record<string, string>)["title"] = agreement.title;
       // Opaque, unguessable draft id (128 random bits), independent of dealId.
       const id = `draft_${randomBytes(16).toString("hex")}`;
       await deps.store.createDraft({

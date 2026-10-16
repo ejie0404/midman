@@ -61,3 +61,25 @@ describe("money formatting (exact, no floats)", () => {
     assert.equal(formatDuration(3_600), "1h 0m 0s");
   });
 });
+
+describe("formatAmount", () => {
+  it("trims to at least two decimals without rounding", async () => {
+    const { formatAmount } = await import("../lib/money.ts");
+    assert.equal(formatAmount("100000000"), "100.00");
+    assert.equal(formatAmount("100500000"), "100.50");
+    assert.equal(formatAmount("123456"), "0.123456");
+    assert.equal(formatAmount(1234567890000n), "1,234,567.89");
+  });
+});
+
+describe("formatSpan", () => {
+  it("reads naturally", async () => {
+    const { formatSpan } = await import("../lib/money.ts");
+    assert.equal(formatSpan(3_600), "1 hour");
+    assert.equal(formatSpan(43_200), "12 hours");
+    assert.equal(formatSpan(259_200), "3 days");
+    assert.equal(formatSpan(108_000), "1 day 6 hours");
+    assert.equal(formatSpan(2_700), "45 minutes");
+  });
+});
+

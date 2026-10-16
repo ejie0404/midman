@@ -4,12 +4,13 @@ import type { CSSProperties } from "react";
 // app/globals.css, so the midnight/sage theme toggle re-skins every page
 // that imports these styles without touching page code.
 
-const FONT = "'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif";
+const FONT = "var(--font-sans)";
 
 export const page: CSSProperties = {
-  maxWidth: 920,
+  maxWidth: 880,
   margin: "0 auto",
-  padding: "40px 20px 72px",
+  padding: "32px 16px 72px",
+  width: "100%",
   fontFamily: FONT,
   lineHeight: 1.55,
   color: "var(--text)",
@@ -19,8 +20,9 @@ export const card: CSSProperties = {
   background: "var(--card)",
   border: "1px solid var(--border)",
   borderRadius: "var(--radius)",
-  padding: 18,
+  padding: 20,
   margin: "16px 0",
+  boxShadow: "var(--shadow-sm)",
 };
 
 export const label: CSSProperties = {
@@ -42,14 +44,15 @@ export const input: CSSProperties = {
 };
 
 export const button: CSSProperties = {
-  padding: "10px 18px",
-  borderRadius: 8,
-  border: "1px solid var(--accent)",
-  background: "var(--accent)",
-  color: "var(--accent-ink)",
+  padding: "0 16px",
+  minHeight: 40,
+  borderRadius: "var(--radius-sm)",
+  border: "1px solid var(--primary)",
+  background: "var(--primary)",
+  color: "var(--on-primary)",
   cursor: "pointer",
   fontSize: 14,
-  fontWeight: 650,
+  fontWeight: 560,
   marginRight: 8,
   marginTop: 8,
   transition: "filter .15s ease, transform .15s ease",
@@ -57,8 +60,9 @@ export const button: CSSProperties = {
 
 export const secondaryButton: CSSProperties = {
   ...button,
-  background: "transparent",
-  color: "var(--accent)",
+  background: "var(--surface)",
+  color: "var(--text)",
+  borderColor: "var(--border-strong)",
 };
 
 export const dangerButton: CSSProperties = {
@@ -69,8 +73,8 @@ export const dangerButton: CSSProperties = {
 };
 
 export const error: CSSProperties = {
-  background: "rgba(255, 123, 114, 0.08)",
-  border: "1px solid rgba(255, 123, 114, 0.35)",
+  background: "var(--danger-soft)",
+  border: "1px solid transparent",
   borderRadius: 8,
   padding: 10,
   margin: "12px 0",
@@ -78,25 +82,25 @@ export const error: CSSProperties = {
 };
 
 export const warning: CSSProperties = {
-  background: "rgba(227, 179, 65, 0.08)",
-  border: "1px solid rgba(227, 179, 65, 0.35)",
+  background: "var(--warning-soft)",
+  border: "1px solid transparent",
   borderRadius: 8,
-  padding: 10,
+  padding: "10px 12px",
   margin: "12px 0",
-  color: "var(--warn)",
+  color: "var(--text)",
 };
 
 export const ok: CSSProperties = {
-  background: "var(--accent-dim)",
-  border: "1px solid var(--border-strong)",
+  background: "var(--success-soft)",
+  border: "1px solid transparent",
   borderRadius: 8,
-  padding: 10,
+  padding: "10px 12px",
   margin: "12px 0",
-  color: "var(--accent-2)",
+  color: "var(--text)",
 };
 
 export const mono: CSSProperties = {
-  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+  fontFamily: "var(--font-mono)",
   wordBreak: "break-all",
   fontSize: 13,
 };

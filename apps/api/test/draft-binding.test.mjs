@@ -118,3 +118,19 @@ describe("POST /drafts pins the binding", () => {
     await app.close();
   });
 });
+
+describe("agreement text", () => {
+  it("accepts text only when it hashes to the signed agreementHash", async () => {
+    const { agreementFromBody } = await import("../dist/routes.js");
+    const { keccak256, stringToHex } = await import("viem");
+    const text = "1x Rare skin bundle, delivered by in-game trade.";
+    const hash = keccak256(stringToHex(text));
+    assert.deepEqual(agreementFromBody({ title: " Rare skin ", agreementText: text }, hash), {
+      title: "Rare skin",
+      text,
+    });
+    assert.match(agreementFromBody({ agreementText: "something else" }, hash).error, /does not match/);
+    assert.match(agreementFromBody({ title: "" }, hash).error, /title/);
+    assert.deepEqual(agreementFromBody({}, hash), { title: null, text: null });
+  });
+});

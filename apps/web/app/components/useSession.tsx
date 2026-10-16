@@ -1,10 +1,11 @@
 "use client";
 
-// Session lifecycle hook for pages that need private data. Wallet connection
-// alone is NOT authentication — `connect` performs the full SIWE challenge /
-// sign / verify flow (lib/session.ts) before any private data is requested.
+// Shared wallet session. One provider (app/layout.tsx) owns the session so the
+// header and every page agree on who is signed in. Wallet connection alone is
+// NOT authentication — `connect` performs the full SIWE challenge / sign /
+// verify flow (lib/session.ts) before any private data is requested.
 
-import { useCallback, useEffect, useState } from "react";
+import { createContext, createElement, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { getAccount, getWalletClient } from "../../lib/wallet";
 import { getSession, isUnauthorized, logout as endSession, signIn, type AuthSession } from "../../lib/session";
 
@@ -19,7 +20,7 @@ export interface UseSession {
   readonly isUnauthorized: typeof isUnauthorized;
 }
 
-export function useSession(): UseSession {
+function useSessionState(): UseSession {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -64,4 +65,18 @@ export function useSession(): UseSession {
   }, []);
 
   return { session, loading, error, refresh, connect, disconnect, isUnauthorized };
+}
+
+const SessionContext = createContext<UseSession | null>(null);
+
+export function SessionProvider({ children }: { children: ReactNode }) {
+  const value = useSessionState();
+  return createElement(SessionContext.Provider, { value }, children);
+}
+
+/** The shared session (SessionProvider wraps every page in app/layout.tsx). */
+export function useSession(): UseSession {
+  const shared = useContext(SessionContext);
+  if (!shared) throw new Error("useSession must be used inside <SessionProvider>");
+  return shared;
 }

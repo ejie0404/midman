@@ -88,6 +88,15 @@ before the audit, not after.
   Still open from Phase 2: deadline notifications (needs an email/Telegram
   provider choice) and smart-wallet signatures (USDC `bytes` 3009 overload,
   ERC-6492), which moves to the wallet work in Phase 3.
+- **Phase 3 (first pass done):** new design system (light/dark/system theme,
+  Geist via `next/font`, tokens + component classes, legacy styles re-skinned),
+  responsive header with one "Sign in" account button and mobile menu, landing
+  page with corrected copy, fee calculator and FAQ, "My deals" dashboard,
+  three-step create-deal wizard (agreement text now stored and hash-checked),
+  and a deal room with progress stepper and role-aware next-action card.
+  Still open: rebuild the review/fund/deliver/inspect/claim sub-pages on the
+  new components, wagmi + EIP-6963/WalletConnect/Coinbase Smart Wallet
+  (needs a WalletConnect project ID), human-readable revert errors.
 
 ## Phases
 

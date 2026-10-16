@@ -49,6 +49,10 @@ export interface CreateDraftInput {
   readonly creatorWallet: string;
   readonly counterpartyHint?: string;
   readonly terms: Record<string, unknown>;
+  /** Short deal title (private to the parties). */
+  readonly title?: string;
+  /** Agreement text; must hash (keccak256) to terms.agreementHash. */
+  readonly agreementText?: string;
 }
 
 export interface CreateDraftResult {
@@ -275,6 +279,25 @@ export function postDealSignatures(
   fetchImpl?: typeof fetch,
 ): Promise<unknown> {
   return requestFunding<unknown>(`/drafts/${encodeURIComponent(draftId)}/deal-signatures`, "POST", payload, fetchImpl);
+}
+
+/** One row of GET /me/deals. */
+export interface MyDeal {
+  readonly draftId: string;
+  readonly dealId: string;
+  readonly role: "buyer" | "seller" | "creator";
+  readonly counterparty: string | null;
+  readonly status: string;
+  readonly category: string | null;
+  readonly principalUnits: string | null;
+  readonly fundedUnits: string | null;
+  readonly chainPhase: string | null;
+}
+
+/** GET /me/deals — the signed-in wallet's deals, newest first. */
+export async function getMyDeals(fetchImpl?: typeof fetch): Promise<MyDeal[]> {
+  const res = await requestFunding<{ deals?: MyDeal[] }>("/me/deals", "GET", undefined, fetchImpl);
+  return Array.isArray(res.deals) ? res.deals : [];
 }
 
 /**

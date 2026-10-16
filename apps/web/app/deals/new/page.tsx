@@ -1,166 +1,174 @@
 "use client";
 
-import { useMemo, useState, useEffect } from "react";
+// Create a deal in three steps: what and how much, timeline and fees, who
+// with. Chain binding (hub, token, policies, fee recipients) comes from the
+// verified deployment configuration and is pinned again by the API, so the
+// user never types contract addresses.
+
+import { useEffect, useMemo, useState } from "react";
 import { keccak256, stringToHex, type Address } from "viem";
 import { quoteFee } from "@midman/shared";
 import { createDraft, inviteDraft, ApiError } from "../../../lib/api";
-import { formatUSDC, parseUSDC } from "../../../lib/money";
-import { CHAIN_ID, HUB_ADDRESS, USDC_ADDRESS, getAccount } from "../../../lib/wallet";
-import {
-  CATEGORIES,
-  CATEGORY_MINIMUMS,
-  FEE_ALLOCATIONS,
-  isHexAddress,
-} from "../../../lib/deal";
-import {
-  agreementBindingFromDefaults,
-  describeAgreement,
-  fetchDealDefaults,
-  type DealDefaults,
-} from "../../../lib/dealDefaults";
-import { button, card, error, input, label, mono, ok, page, secondaryButton, warning } from "../../components/styles";
+import { formatAmount, formatSpan, parseUSDC } from "../../../lib/money";
+import { CATEGORY_MINIMUMS, isHexAddress } from "../../../lib/deal";
+import { categoryLabel } from "../../../lib/dealPhase";
+import { agreementBindingFromDefaults, fetchDealDefaults, type DealDefaults } from "../../../lib/dealDefaults";
 import { useSession } from "../../components/useSession";
+import { Button, ButtonLink, Callout, Card, Field, Icon, KeyValues, Segmented } from "../../components/ui";
 
-function toSeconds(hours: string): number | null {
-  if (!/^\d+(\.\d+)?$/.test(hours.trim())) return null;
-  const seconds = Math.round(Number(hours) * 3_600);
-  return Number.isInteger(seconds) ? seconds : null;
+const HOUR = 3_600;
+const DAY = 86_400;
+
+const CATEGORY_HELP: Record<string, string> = {
+  INSTANT_CODE: "Gift cards, keys and codes you can check right away.",
+  GAME_ITEM: "Skins, items and in-game goods.",
+  GAME_CURRENCY: "Gold, coins and other in-game currency.",
+  DIGITAL_GOOD: "Files, licences, designs and other digital products.",
+  SERVICE: "Work done for you: boosting, design, development.",
+  GAME_ACCOUNT: "Whole accounts. We recommend 72 hours to inspect.",
+};
+
+const DELIVERY_PRESETS = [
+  { value: HOUR, label: "1 hour" },
+  { value: 6 * HOUR, label: "6 hours" },
+  { value: DAY, label: "1 day" },
+  { value: 3 * DAY, label: "3 days" },
+  { value: 7 * DAY, label: "7 days" },
+];
+
+const INSPECTION_PRESETS = [HOUR, 12 * HOUR, DAY, 3 * DAY, 7 * DAY, 14 * DAY];
+
+const FEE_PAYERS = [
+  { value: 10_000, label: "Buyer pays" },
+  { value: 5_000, label: "Split 50/50" },
+  { value: 0, label: "Seller pays" },
+] as const;
+
+type FeeBps = 0 | 5_000 | 10_000;
+type Role = "buyer" | "seller";
+
+function feeTierNote(durationSeconds: number): string {
+  if (durationSeconds <= 3 * HOUR) return "0.25% tier (3 hours or less)";
+  if (durationSeconds < DAY) return "0.50% tier (under 24 hours)";
+  if (durationSeconds <= 3 * DAY) return "0.70% tier (1 to 3 days)";
+  if (durationSeconds <= 7 * DAY) return "1.00% tier (3 to 7 days)";
+  return "2.00% tier (over 7 days)";
+}
+
+function WizardSteps({ step }: { step: number }) {
+  const labels = ["The deal", "Timeline & fees", "Counterparty"];
+  return (
+    <ol className="wizard-steps" aria-label="Steps">
+      {labels.map((label, i) => (
+        <li key={label} data-state={i < step ? "done" : i === step ? "current" : "todo"}>
+          <span className="num-badge">{i < step ? <Icon name="check" size={13} /> : i + 1}</span>
+          {label}
+        </li>
+      ))}
+    </ol>
+  );
 }
 
 export default function NewDealPage() {
-  const [role, setRole] = useState<"buyer" | "seller">("buyer");
-  const [creatorWallet, setCreatorWallet] = useState("");
   const { session, connect } = useSession();
-  const [counterparty, setCounterparty] = useState("");
-  const [counterpartyHint, setCounterpartyHint] = useState("");
-  const [principal, setPrincipal] = useState("100");
-  const [deliveryHours, setDeliveryHours] = useState("24");
-  const [inspectionHours, setInspectionHours] = useState("24");
-  const [category, setCategory] = useState<string>(CATEGORIES[3] ?? "DIGITAL_GOOD");
-  const [feeBps, setFeeBps] = useState<0 | 5_000 | 10_000>(10_000);
+  const [step, setStep] = useState(0);
+  const [role, setRole] = useState<Role>("buyer");
+  const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [hub, setHub] = useState<string>(HUB_ADDRESS);
-  const [token, setToken] = useState<string>(USDC_ADDRESS);
-  const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [category, setCategory] = useState("GAME_ITEM");
+  const [amount, setAmount] = useState("");
+  const [delivery, setDelivery] = useState<number>(DAY);
+  const [inspection, setInspection] = useState<number>(DAY);
+  const [feeBps, setFeeBps] = useState<FeeBps>(10_000);
+  const [counterparty, setCounterparty] = useState("");
   const [defaults, setDefaults] = useState<DealDefaults | null>(null);
   const [defaultsError, setDefaultsError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ draftId: string; dealId: string; inviteUrl: string } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [result, setResult] = useState<{ draftId: string; inviteUrl: string } | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const loaded = await fetchDealDefaults();
-        if (!cancelled) setDefaults(loaded);
-      } catch (e) {
-        if (!cancelled) {
-          setDefaultsError(
-            e instanceof Error
-              ? `Verified deal configuration unavailable (${e.message}). Refusing to build a draft with empty policy ids.`
-              : "Verified deal configuration unavailable.",
-          );
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    fetchDealDefaults()
+      .then(setDefaults)
+      .catch((e: unknown) => setDefaultsError(e instanceof Error ? e.message : String(e)));
   }, []);
 
-  const preview = useMemo(() => {
-    try {
-      const principalUnits = BigInt(parseUSDC(principal));
-      const deliverySeconds = toSeconds(deliveryHours);
-      const inspectionSeconds = toSeconds(inspectionHours);
-      if (deliverySeconds === null || inspectionSeconds === null) {
-        return { error: "Durations must be decimal hours." };
-      }
-      const minInspection = CATEGORY_MINIMUMS[category] ?? 0;
-      if (deliverySeconds < 3_600 || deliverySeconds > 2_592_000) {
-        return { error: "Delivery must be 1h–30d." };
-      }
-      if (inspectionSeconds < minInspection || inspectionSeconds > 1_209_600) {
-        return { error: `Inspection violates the ${category} minimum.` };
-      }
-      const duration = deliverySeconds + inspectionSeconds;
-      const quoted = quoteFee(principalUnits, duration);
-      const prepaid = (quoted * BigInt(feeBps)) / 10_000n;
-      return {
-        principalUnits: principalUnits.toString(),
-        quoted: quoted.toString(),
-        prepaid: prepaid.toString(),
-        funded: (principalUnits + prepaid).toString(),
-        duration,
-      };
-    } catch (e) {
-      return { error: e instanceof Error ? e.message : String(e) };
-    }
-  }, [principal, deliveryHours, inspectionHours, category, feeBps]);
+  const minInspection = CATEGORY_MINIMUMS[category] ?? HOUR;
+  // Keep inspection valid when the category changes.
+  useEffect(() => {
+    if (inspection < minInspection) setInspection(category === "GAME_ACCOUNT" ? 3 * DAY : minInspection);
+  }, [category, inspection, minInspection]);
 
-  async function useConnectedWallet() {
+  const amountUnits = useMemo(() => {
     try {
-      setCreatorWallet(await getAccount());
-    } catch (e) {
-      setSubmitError(e instanceof Error ? e.message : String(e));
+      return BigInt(parseUSDC(amount));
+    } catch {
+      return null;
     }
-  }
+  }, [amount]);
+  const amountError =
+    amount.trim() === "" ? null : amountUnits === null ? "Enter an amount like 250 or 99.50" : amountUnits < 5_000_000n ? "The minimum deal is 5.00 USDC" : null;
+
+  const quote = useMemo(() => {
+    if (amountUnits === null || amountUnits < 5_000_000n) return null;
+    const fee = quoteFee(amountUnits, delivery + inspection);
+    const buyerFee = (fee * BigInt(feeBps)) / 10_000n;
+    const sellerFee = fee - buyerFee;
+    return { fee, buyerDeposits: amountUnits + buyerFee, sellerReceives: amountUnits - sellerFee };
+  }, [amountUnits, delivery, inspection, feeBps]);
+
+  const counterpartyError =
+    counterparty.trim() === ""
+      ? null
+      : !isHexAddress(counterparty.trim())
+        ? "Enter a wallet address (0x followed by 40 characters)"
+        : session && counterparty.trim().toLowerCase() === session.wallet.toLowerCase()
+          ? "That's your own wallet"
+          : null;
+
+  const step0Valid = title.trim().length > 0 && amountError === null && quote !== null;
+  const step2Valid = isHexAddress(counterparty.trim()) && counterpartyError === null && defaults !== null;
 
   async function submit() {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      // Drafts are created by a signed-in wallet (the API binds the creator to
-      // the session). Sign in first when needed; the session wallet is the
-      // creator, whatever was typed in the field.
-      const active =
-        session && creatorWallet !== "" && session.wallet.toLowerCase() === creatorWallet.toLowerCase()
-          ? session
-          : await connect();
-      const signedInWallet = active.wallet;
-      setCreatorWallet(signedInWallet);
-      if (!isHexAddress(signedInWallet)) throw new Error("Creator wallet must be a 0x address");
-      if (!isHexAddress(counterparty)) throw new Error("Counterparty must be a 0x address");
-      if (!defaults) throw new Error(defaultsError ?? "Verified deal configuration is not loaded yet");
-      if (!preview || "error" in preview || !preview.principalUnits) throw new Error(preview?.error ?? "Invalid preview");
-      const deliverySeconds = toSeconds(deliveryHours);
-      const inspectionSeconds = toSeconds(inspectionHours);
-      if (deliverySeconds === null || inspectionSeconds === null) throw new Error("Invalid durations");
-      const buyer = (role === "buyer" ? signedInWallet : counterparty) as Address;
-      const seller = (role === "buyer" ? counterparty : signedInWallet) as Address;
-      const agreementHash = keccak256(stringToHex(description.trim() === "" ? `midman:${Date.now()}` : description));
-      // Agreement binding comes ONLY from verified configuration: real hub,
-      // USDC, chain id, the eight policy ids, and the configured recipients.
+      if (!defaults) throw new Error(defaultsError ?? "Deal configuration is still loading");
+      if (!quote || amountUnits === null) throw new Error("Check the amount");
+      const active = session ?? (await connect());
+      const me = active.wallet as Address;
+      const other = counterparty.trim() as Address;
+      const agreementText = [title.trim(), description.trim()].filter(Boolean).join("\n\n");
       const binding = agreementBindingFromDefaults(defaults);
-      const terms = {
-        buyer,
-        seller,
-        principalUnits: preview.principalUnits,
-        buyerFeeBps: feeBps,
-        deliverySeconds,
-        inspectionSeconds,
-        category,
-        agreementHash,
-        policyIds: binding.policyIds,
-        platformFeeRecipient: binding.platformFeeRecipient,
-        arbitrationCostRecipient: binding.arbitrationCostRecipient,
-        hub: binding.hub,
-        token: binding.token,
-        chainId: binding.chainId,
-        fundingDays: 7,
-      };
-      const body: { creatorWallet: string; terms: Record<string, unknown>; counterpartyHint?: string } = {
-        creatorWallet: signedInWallet,
-        terms: terms as unknown as Record<string, unknown>,
-      };
-      if (counterpartyHint.trim() !== "") body.counterpartyHint = counterpartyHint.trim();
-      const created = await createDraft(body);
+      const created = await createDraft({
+        creatorWallet: me,
+        // Only this wallet can accept the invite.
+        counterpartyHint: other,
+        title: title.trim(),
+        agreementText,
+        terms: {
+          buyer: role === "buyer" ? me : other,
+          seller: role === "seller" ? me : other,
+          principalUnits: amountUnits.toString(),
+          buyerFeeBps: feeBps,
+          deliverySeconds: delivery,
+          inspectionSeconds: inspection,
+          category,
+          agreementHash: keccak256(stringToHex(agreementText)),
+          policyIds: binding.policyIds,
+          platformFeeRecipient: binding.platformFeeRecipient,
+          arbitrationCostRecipient: binding.arbitrationCostRecipient,
+          hub: binding.hub,
+          token: binding.token,
+          chainId: binding.chainId,
+          fundingDays: 7,
+        },
+      });
       const invite = await inviteDraft(created.id);
-      const origin = window.location.origin;
       setResult({
         draftId: created.id,
-        dealId: created.dealId,
-        inviteUrl: `${origin}/deals/${created.id}/review#invite=${invite.invitationToken}`,
+        inviteUrl: `${window.location.origin}/deals/${created.id}/review#invite=${invite.invitationToken}`,
       });
     } catch (e) {
       setSubmitError(e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e));
@@ -171,159 +179,210 @@ export default function NewDealPage() {
 
   if (result) {
     return (
-      <main style={page}>
-        <h1>Draft created — share the invite link</h1>
-        <div style={ok}>
-          <p>
-            Draft <span style={mono}>{result.draftId}</span> · deal <span style={mono}>{result.dealId}</span>
-          </p>
-          <p>
-            Send this private link to the counterparty. The invitation token lives only in the URL fragment (after
-            #) — it is never logged and never sent to the server.
-          </p>
-          <p style={mono}>{result.inviteUrl}</p>
-          <button
-            type="button"
-            style={secondaryButton}
-            onClick={() => {
-              void navigator.clipboard.writeText(result.inviteUrl);
-            }}
-          >
-            Copy invite link
-          </button>
+      <main className="container container-narrow page stack">
+        <div>
+          <span className="feature-icon" style={{ background: "var(--success-soft)", color: "var(--success)" }}>
+            <Icon name="check" />
+          </span>
+          <h1>Your deal is drafted</h1>
+          <p className="muted">Send this private link to the other side. Only their wallet can accept it.</p>
         </div>
-        <p>
-          <a href={`/deals/${result.draftId}`}>Open deal dashboard</a> ·{" "}
-          <a href={`/deals/${result.draftId}/review`}>Open review & sign</a>
-        </p>
+        <Card>
+          <div className="row">
+            <input readOnly value={result.inviteUrl} aria-label="Invite link" className="mono" style={{ flex: "1 1 280px", width: "auto" }} />
+            <Button
+              onClick={() => {
+                void navigator.clipboard.writeText(result.inviteUrl).then(() => setCopied(true));
+              }}
+            >
+              {copied ? "Copied" : "Copy link"}
+            </Button>
+          </div>
+          <p className="small muted" style={{ marginTop: 10 }}>
+            The invite code sits after the # in the link, so it never reaches any server log. It expires in 7 days.
+          </p>
+        </Card>
+        <Card title="What happens next">
+          <ol className="timeline">
+            <li>
+              <span className="num-badge">1</span>
+              <div>They open the link, sign in with their wallet and accept.</div>
+            </li>
+            <li>
+              <span className="num-badge">2</span>
+              <div>You both sign the same terms.</div>
+            </li>
+            <li>
+              <span className="num-badge">3</span>
+              <div>The buyer funds the escrow and the seller can deliver.</div>
+            </li>
+          </ol>
+        </Card>
+        <div className="row">
+          <ButtonLink href={`/deals/${encodeURIComponent(result.draftId)}`}>Open the deal</ButtonLink>
+          <ButtonLink href="/deals" variant="secondary">
+            My deals
+          </ButtonLink>
+        </div>
       </main>
     );
   }
 
   return (
-    <main style={page}>
-      <h1>New deal</h1>
-      <p>
-        <a href="/">← Home</a>
-      </p>
+    <main className="container page">
+      <div className="grid-2" style={{ alignItems: "start", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 380px), 1fr))" }}>
+        <div className="stack">
+          <div>
+            <h1>New deal</h1>
+            <p className="muted">Draft the terms. Nothing is charged until the buyer funds the escrow.</p>
+          </div>
+          <WizardSteps step={step} />
+          {defaultsError ? (
+            <Callout tone="danger" title="Deals can't be created right now">
+              The deployment configuration could not be loaded ({defaultsError}).
+            </Callout>
+          ) : null}
 
-      <label style={label}>Your role</label>
-      <select value={role} onChange={(e) => setRole(e.target.value as "buyer" | "seller")} style={input}>
-        <option value="buyer">I am the buyer (I fund)</option>
-        <option value="seller">I am the seller (I deliver)</option>
-      </select>
+          {step === 0 ? (
+            <Card>
+              <div className="stack">
+                <Field label="I am">
+                  <Segmented
+                    label="Your role"
+                    value={role}
+                    options={[
+                      { value: "buyer", label: "Buying (I pay)" },
+                      { value: "seller", label: "Selling (I deliver)" },
+                    ]}
+                    onChange={setRole}
+                  />
+                </Field>
+                <Field label="What is being sold?" htmlFor="title" hint="A short title both sides will see.">
+                  <input id="title" maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Rare skin bundle" />
+                </Field>
+                <Field label="Details (optional)" htmlFor="details" hint="Exactly what will be delivered and how. This becomes part of the signed agreement.">
+                  <textarea id="details" maxLength={3_800} value={description} onChange={(e) => setDescription(e.target.value)} />
+                </Field>
+                <Field label="Category" htmlFor="category" hint={`${CATEGORY_HELP[category] ?? ""} Minimum inspection: ${formatSpan(minInspection)}.`}>
+                  <select id="category" value={category} onChange={(e) => setCategory(e.target.value)}>
+                    {Object.keys(CATEGORY_MINIMUMS).map((key) => (
+                      <option key={key} value={key}>
+                        {categoryLabel(key)}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Price (USDC)" htmlFor="amount" error={amountError} hint="Minimum 5.00 USDC.">
+                  <input id="amount" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="250.00" />
+                </Field>
+                <Button size="lg" disabled={!step0Valid} onClick={() => setStep(1)}>
+                  Continue
+                </Button>
+              </div>
+            </Card>
+          ) : null}
 
-      <label style={label}>Your wallet address</label>
-      <input style={input} value={creatorWallet} onChange={(e) => setCreatorWallet(e.target.value)} placeholder="0x…" />
-      <button type="button" style={secondaryButton} onClick={() => void useConnectedWallet()}>
-        Use connected wallet
-      </button>
+          {step === 1 ? (
+            <Card>
+              <div className="stack">
+                <Field label="Delivery window" hint="How long the seller has to deliver after funding. If they don't, the buyer gets a full refund.">
+                  <Segmented label="Delivery window" value={delivery} options={DELIVERY_PRESETS} onChange={setDelivery} />
+                </Field>
+                <Field label="Inspection window" hint="How long the buyer has to check the delivery. Payment releases automatically when it ends.">
+                  <Segmented
+                    label="Inspection window"
+                    value={inspection}
+                    options={INSPECTION_PRESETS.filter((s) => s >= minInspection).map((s) => ({ value: s, label: formatSpan(s) }))}
+                    onChange={setInspection}
+                  />
+                </Field>
+                <Field label="Who pays the fee?">
+                  <Segmented label="Fee payer" value={feeBps} options={FEE_PAYERS} onChange={(v) => setFeeBps(v as FeeBps)} />
+                </Field>
+                <div className="row">
+                  <Button variant="secondary" onClick={() => setStep(0)}>
+                    Back
+                  </Button>
+                  <Button size="lg" onClick={() => setStep(2)} style={{ flex: 1 }}>
+                    Continue
+                  </Button>
+                </div>
+              </div>
+            </Card>
+          ) : null}
 
-      <label style={label}>Counterparty address</label>
-      <input style={input} value={counterparty} onChange={(e) => setCounterparty(e.target.value)} placeholder="0x…" />
-
-      <label style={label}>Counterparty hint (optional, must match on accept)</label>
-      <input
-        style={input}
-        value={counterpartyHint}
-        onChange={(e) => setCounterpartyHint(e.target.value)}
-        placeholder="email, handle, or address"
-      />
-
-      <label style={label}>Principal (USDC, decimal — converted to exact units, no floats)</label>
-      <input style={input} value={principal} onChange={(e) => setPrincipal(e.target.value)} inputMode="decimal" />
-
-      <label style={label}>Delivery (hours, 1h–720h)</label>
-      <input style={input} value={deliveryHours} onChange={(e) => setDeliveryHours(e.target.value)} inputMode="decimal" />
-
-      <label style={label}>Inspection (hours, max 336h)</label>
-      <input
-        style={input}
-        value={inspectionHours}
-        onChange={(e) => setInspectionHours(e.target.value)}
-        inputMode="decimal"
-      />
-
-      <label style={label}>Category (inspection minimums enforced)</label>
-      <select value={category} onChange={(e) => setCategory(e.target.value)} style={input}>
-        {CATEGORIES.map((c) => {
-          const minHours = (CATEGORY_MINIMUMS[c] ?? 0) / 3_600;
-          return (
-            <option key={c} value={c}>
-              {c} — min inspection {minHours}h
-            </option>
-          );
-        })}
-      </select>
-
-      <label style={label}>Fee payer</label>
-      <select
-        value={String(feeBps)}
-        onChange={(e) => setFeeBps(Number(e.target.value) as 0 | 5_000 | 10_000)}
-        style={input}
-      >
-        {FEE_ALLOCATIONS.map((f) => (
-          <option key={f.bps} value={String(f.bps)}>
-            {f.label}
-          </option>
-        ))}
-      </select>
-
-      <label style={label}>Agreement description (hashed into agreementHash)</label>
-      <textarea style={{ ...input, minHeight: 80 }} value={description} onChange={(e) => setDescription(e.target.value)} />
-
-      <div style={card}>
-        <h3>Chain binding</h3>
-        <label style={label}>Hub address</label>
-        <input style={input} value={hub} onChange={(e) => setHub(e.target.value)} placeholder="0x…" />
-        <label style={label}>USDC token address</label>
-        <input style={input} value={token} onChange={(e) => setToken(e.target.value)} placeholder="0x…" />
-        <p style={{ fontSize: 13 }}>Chain ID: {CHAIN_ID}</p>
-      </div>
-
-      <div style={card}>
-        <h3>Live exact preview</h3>
-        {"error" in preview || !preview.principalUnits ? (
-          <div style={error}>{preview && "error" in preview ? preview.error : "Enter valid amounts."}</div>
-        ) : (
-          <ul>
-            <li>Principal: {formatUSDC(preview.principalUnits)}</li>
-            <li>Quoted platform fee: {formatUSDC(preview.quoted)}</li>
-            <li>Buyer prepaid fee share: {formatUSDC(preview.prepaid)}</li>
-            <li>
-              <strong>Total funding (exact): {formatUSDC(preview.funded)}</strong>
-            </li>
-          </ul>
-        )}
-      </div>
-
-      {defaultsError ? <div style={warning}>{defaultsError}</div> : null}
-      {defaults ? (
-        <div style={card}>
-          <h3>Verified agreement binding (from /config/deal-defaults)</h3>
-          <ul style={{ fontSize: 13 }}>
-            <li>
-              hub <span style={mono}>{describeAgreement(defaults).hub}</span> · USDC{" "}
-              <span style={mono}>{describeAgreement(defaults).token}</span> · chainId{" "}
-              {describeAgreement(defaults).chainId}
-            </li>
-            <li>
-              platform fee recipient <span style={mono}>{defaults.platformFeeRecipient}</span> · arbitration cost
-              recipient <span style={mono}>{defaults.arbitrationCostRecipient}</span>
-            </li>
-            {describeAgreement(defaults).policies.map((p) => (
-              <li key={p.slot}>
-                {p.slot}: <span style={mono}>{p.id}</span>
-              </li>
-            ))}
-          </ul>
+          {step === 2 ? (
+            <Card>
+              <div className="stack">
+                <Field
+                  label={role === "buyer" ? "Seller's wallet address" : "Buyer's wallet address"}
+                  htmlFor="counterparty"
+                  error={counterpartyError}
+                  hint="Only this wallet will be able to accept your invite. Ask them to copy it from their wallet."
+                >
+                  <input
+                    id="counterparty"
+                    className="mono"
+                    value={counterparty}
+                    onChange={(e) => setCounterparty(e.target.value)}
+                    placeholder="0x…"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </Field>
+                {!session ? (
+                  <Callout tone="info">
+                    You&apos;ll be asked to sign in with your wallet. Signing in authorizes no funds.
+                  </Callout>
+                ) : null}
+                {submitError ? <Callout tone="danger" title="The deal wasn't created">{submitError}</Callout> : null}
+                <div className="row">
+                  <Button variant="secondary" onClick={() => setStep(1)}>
+                    Back
+                  </Button>
+                  <Button size="lg" disabled={!step2Valid || submitting} onClick={() => void submit()} style={{ flex: 1 }}>
+                    {submitting ? "Creating…" : session ? "Create deal & get invite link" : "Sign in & create deal"}
+                  </Button>
+                </div>
+              </div>
+            </Card>
+          ) : null}
         </div>
-      ) : null}
 
-      {submitError ? <div style={error}>{submitError}</div> : null}
-      <button type="button" style={button} disabled={submitting || !defaults} onClick={() => void submit()}>
-        {submitting ? "Creating…" : "Create draft + invite link"}
-      </button>
+        <aside className="card" style={{ position: "sticky", top: 84 }} aria-label="Deal summary">
+          <span className="eyebrow">Summary</span>
+          <h2 style={{ margin: "8px 0 2px" }}>{title.trim() || "Untitled deal"}</h2>
+          <p className="small muted">
+            {categoryLabel(category)} · you are the {role}
+          </p>
+          <div className="amount amount-lg" style={{ margin: "14px 0" }}>
+            {amountUnits !== null ? formatAmount(amountUnits) : "0.00"} <span className="muted" style={{ fontSize: "1rem" }}>USDC</span>
+          </div>
+          {quote ? (
+            <KeyValues
+              rows={[
+                { label: "Platform fee", value: `${formatAmount(quote.fee)} USDC` },
+                { label: "Buyer deposits", value: `${formatAmount(quote.buyerDeposits)} USDC` },
+                { label: "Seller receives on release", value: `${formatAmount(quote.sellerReceives)} USDC`, total: true },
+              ]}
+            />
+          ) : (
+            <p className="small muted">Enter a price to see fees.</p>
+          )}
+          <hr className="divider" />
+          <KeyValues
+            rows={[
+              { label: "Delivery window", value: formatSpan(delivery) },
+              { label: "Inspection window", value: formatSpan(inspection) },
+              { label: "Fee rate", value: feeTierNote(delivery + inspection) },
+            ]}
+          />
+          <p className="small muted" style={{ marginTop: 12, marginBottom: 0 }}>
+            The buyer has 7 days to fund once both sides sign. Shorter deals are cheaper: the fee depends on delivery plus
+            inspection time.
+          </p>
+        </aside>
+      </div>
     </main>
   );
 }

@@ -1,87 +1,146 @@
 "use client";
 
-import { useTheme } from "../theme";
-import WalletButton from "./WalletButton";
-import {
-  brand,
-  brandTag,
-  navCta,
-  navLink,
-  navRow,
-  headerBar,
-  headerInner,
-  themeBtn,
-} from "./styles";
+import { useEffect, useRef, useState } from "react";
+import { useTheme, type ThemeMode } from "../theme";
+import { useSession } from "./useSession";
+import { BrandMark, Button, Icon, type IconName } from "./ui";
+import { shortAddress } from "../../lib/dealPhase";
 
 const LINKS = [
-  { href: "/", label: "Home" },
+  { href: "/deals", label: "My deals" },
   { href: "/deals/new", label: "New deal" },
-  { href: "/review", label: "Review queue" },
+  { href: "/#how-it-works", label: "How it works" },
+  { href: "/#fees", label: "Fees" },
 ];
 
-function BrandMark() {
-  return (
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden>
-      <rect
-        x="1.5"
-        y="1.5"
-        width="21"
-        height="21"
-        rx="6"
-        stroke="var(--accent)"
-        strokeWidth="1.6"
-      />
-      <path
-        d="M8 12.5l2.6 2.6L16.5 9.5"
-        stroke="var(--accent)"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
+const THEME_ICON: Record<ThemeMode, IconName> = { system: "monitor", light: "sun", dark: "moon" };
+const THEME_LABEL: Record<ThemeMode, string> = { system: "System theme", light: "Light theme", dark: "Dark theme" };
 
-function ThemeIcon() {
+function AccountButton() {
+  const { session, loading, connect, disconnect, error } = useSession();
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  if (loading) return <span className="skeleton" style={{ width: 120, height: 38, display: "inline-block" }} />;
+
+  if (!session) {
+    return (
+      <Button
+        variant="primary"
+        disabled={busy}
+        title={error ?? "Connect your wallet and sign a one-time login message. No funds are authorized."}
+        onClick={() => {
+          setBusy(true);
+          void connect()
+            .catch(() => undefined)
+            .finally(() => setBusy(false));
+        }}
+      >
+        <Icon name="wallet" size={16} />
+        {busy ? "Check your wallet…" : "Sign in"}
+      </Button>
+    );
+  }
+
   return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
-      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
-      <path d="M12 3a9 9 0 0 1 0 18V3z" fill="currentColor" />
-    </svg>
+    <div ref={ref} style={{ position: "relative" }}>
+      <Button variant="secondary" aria-expanded={open} aria-haspopup="menu" onClick={() => setOpen((v) => !v)}>
+        <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--success)" }} aria-hidden />
+        <span className="mono">{shortAddress(session.wallet)}</span>
+      </Button>
+      {open ? (
+        <div
+          role="menu"
+          className="card"
+          style={{ position: "absolute", right: 0, top: 46, minWidth: 220, padding: 8, boxShadow: "var(--shadow)" }}
+        >
+          <div className="small muted" style={{ padding: "6px 8px" }}>
+            Signed in as <span className="mono">{shortAddress(session.wallet)}</span>
+          </div>
+          <a role="menuitem" href="/deals" className="btn btn-ghost btn-block" style={{ justifyContent: "flex-start" }}>
+            My deals
+          </a>
+          <button
+            role="menuitem"
+            type="button"
+            className="btn btn-ghost btn-block"
+            style={{ justifyContent: "flex-start" }}
+            onClick={() => {
+              setOpen(false);
+              void disconnect();
+            }}
+          >
+            Sign out
+          </button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
 export default function Header() {
-  const { theme, toggle } = useTheme();
+  const { mode, cycle } = useTheme();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [path, setPath] = useState("");
+
+  useEffect(() => setPath(window.location.pathname), []);
+
   return (
-    <header style={headerBar}>
-      <div style={headerInner}>
-        <a href="/" style={brand}>
+    <header className="site-header">
+      <div className="container site-header-inner">
+        <a href="/" className="brand" aria-label="Midman home">
           <BrandMark />
-          <span>Midman</span>
-          <span style={brandTag}>escrow</span>
+          Midman
         </a>
-        <nav style={navRow} aria-label="Primary">
-          {LINKS.map((l) => (
-            <a key={l.href} href={l.href} style={navLink}>
-              {l.label}
+        <nav className="nav-links" aria-label="Primary">
+          {LINKS.map((link) => (
+            <a key={link.href} href={link.href} aria-current={path === link.href ? "page" : undefined}>
+              {link.label}
             </a>
           ))}
-          <a href="/deals/new" style={navCta}>
-            Create deal
-          </a>
-          <WalletButton />
+        </nav>
+        <div className="header-actions">
           <button
             type="button"
-            onClick={toggle}
-            style={themeBtn}
-            title={`Color theme: ${theme}. Click to switch.`}
-            aria-label="Toggle color theme"
+            className="icon-btn hide-mobile"
+            onClick={cycle}
+            aria-label={`${THEME_LABEL[mode]} (click to change)`}
+            title={THEME_LABEL[mode]}
           >
-            <ThemeIcon />
+            <Icon name={THEME_ICON[mode]} size={17} />
           </button>
-        </nav>
+          <AccountButton />
+          <button
+            type="button"
+            className="icon-btn menu-toggle"
+            aria-label={menuOpen ? "Close menu" : "Open menu"}
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((v) => !v)}
+          >
+            <Icon name={menuOpen ? "close" : "menu"} />
+          </button>
+        </div>
       </div>
+      <nav className="mobile-menu" data-open={menuOpen} aria-label="Mobile">
+        {LINKS.map((link) => (
+          <a key={link.href} href={link.href} onClick={() => setMenuOpen(false)}>
+            {link.label}
+          </a>
+        ))}
+        <button type="button" className="btn btn-ghost" style={{ justifyContent: "flex-start" }} onClick={cycle}>
+          <Icon name={THEME_ICON[mode]} size={17} /> {THEME_LABEL[mode]}
+        </button>
+      </nav>
     </header>
   );
 }
