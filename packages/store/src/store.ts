@@ -188,6 +188,16 @@ export interface Store {
    * locks are not available (in-memory).
    */
   authGetForUpdate(scope: string, key: string): Promise<unknown | null>;
+  /**
+   * Delete expired auth-state rows (login challenges, nonces). Reads already
+   * ignore them; this only bounds storage. Optional for test fakes.
+   */
+  authPruneExpired?(): Promise<number>;
+  /**
+   * Drafts where `wallet` is the creator, buyer or seller, most recently
+   * updated first. Optional for test fakes.
+   */
+  listDraftsForWallet?(wallet: string, limit: number): Promise<DraftRecord[]>;
 
   // ---- Invitations / revocations ----
   saveInvitation(record: InvitationRecord): Promise<void>;
@@ -232,6 +242,17 @@ export class MemoryStore implements Store {
   async getDraft(id: string): Promise<DraftRecord | null> {
     const draft = this.drafts.get(id);
     return draft ? { ...draft } : null;
+  }
+  async listDraftsForWallet(wallet: string, limit: number): Promise<DraftRecord[]> {
+    const want = wallet.toLowerCase();
+    const matches: DraftRecord[] = [];
+    // Newest first: the Map keeps insertion order, so walk it backwards.
+    for (const draft of [...this.drafts.values()].reverse()) {
+      const roles = [draft.creatorWallet, draft.terms["buyer"] ?? "", draft.terms["seller"] ?? ""];
+      if (roles.some((value) => value !== "" && value.toLowerCase() === want)) matches.push({ ...draft });
+      if (matches.length >= limit) break;
+    }
+    return matches;
   }
   async getDraftByDeal(dealId: string): Promise<DraftRecord | null> {
     for (const draft of this.drafts.values()) {
@@ -586,6 +607,19 @@ export class MemoryStore implements Store {
   }
   async authDelete(scope: string, key: string): Promise<void> {
     this.auth.get(scope)?.delete(key);
+  }
+  async authPruneExpired(): Promise<number> {
+    const now = Date.now();
+    let removed = 0;
+    for (const byScope of this.auth.values()) {
+      for (const [key, entry] of byScope) {
+        if (entry.expiresAt !== null && new Date(entry.expiresAt).getTime() <= now) {
+          byScope.delete(key);
+          removed += 1;
+        }
+      }
+    }
+    return removed;
   }
   async authList(scope: string): Promise<AuthStateEntry[]> {
     const byScope = this.auth.get(scope);

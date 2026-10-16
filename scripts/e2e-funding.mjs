@@ -136,8 +136,24 @@ async function main() {
     process.env.USDC_ADDRESS = usdc;
     process.env.BASE_CHAIN_ID = "31337";
     process.env.BASE_RPC_URLS = ANVIL_RPC;
+    // Pinned deployment binding (server ignores client recipients/policies)
+    // and the automated admission service, signing as the dev admission
+    // signer (DeployDev sets admissionSigner = deployer = anvil account 0).
+    process.env.MIDMAN_POLICY_IDS = JSON.stringify({
+      fee: policyId("MIDMAN.FEE.v1"),
+      category: policyId("MIDMAN.CATEGORY.GAME_ITEM.v1"),
+      readiness: policyId("MIDMAN.READINESS.NONE.v1"),
+      evidence: policyId("MIDMAN.EVIDENCE.v1"),
+      bond: policyId("MIDMAN.BOND.5USDC.v1"),
+      arbitration: policyId("MIDMAN.ARBITRATION.ALL.v1"),
+      outage: policyId("MIDMAN.OUTAGE.v1"),
+      catastrophic: policyId("MIDMAN.CATASTROPHIC.v1"),
+    });
+    process.env.PLATFORM_FEE_RECIPIENT = ANVIL_ACCOUNT0;
+    process.env.ARBITRATION_COST_RECIPIENT = ANVIL_ACCOUNT0;
+    process.env.ADMISSION_SIGNER_KEY = ANVIL_ACCOUNT0_KEY;
+    process.env.ADMISSION_MAX_PRINCIPAL_UNITS = "1000000000";
     const { buildServerAsync } = await import(pathToFileURL(path.join(REPO_ROOT, "apps/api/dist/server.js")).href);
-    const { fundingAdmissionTypedData } = await import(pathToFileURL(path.join(REPO_ROOT, "apps/api/dist/chainActions.js")).href);
     // Real web code (erasable TS, loaded directly).
     const webFunding = await import(pathToFileURL(path.join(REPO_ROOT, "apps/web/lib/funding.ts")).href);
     const { confirmEvent } = await import(pathToFileURL(path.join(REPO_ROOT, "apps/web/lib/wallet.ts")).href);
@@ -226,35 +242,12 @@ async function main() {
     checkStatus(await call("POST", `/drafts/${draftId}/deal-signatures`, { role: "buyer", signature: buyerSig }), "buyer sign");
     checkStatus(await call("POST", `/drafts/${draftId}/deal-signatures`, { role: "seller", signature: sellerSig }), "seller sign");
 
-    // 6. Operator admission (risk signer) -> stored via the operator route.
-    const now = Math.floor(Date.now() / 1000);
-    const admissionTyped = fundingAdmissionTypedData({
-      chainId: 31337,
-      hub,
-      agreementDigest: bundle.agreementDigest,
-      minPolicyId: bundle.fullTerms.categoryPolicyId,
-      admissionNonce: `0x${randomBytes(32).toString("hex")}`,
-      expiresAt: now + 86_400,
-      expectedUnfunded: true,
-    });
-    const admissionSig = await operatorClient.signTypedData({
-      account: operator,
-      domain: admissionTyped.domain,
-      types: admissionTyped.types,
-      primaryType: "FundingAdmission",
-      message: admissionTyped.message,
-    });
-    checkStatus(
-      await call("POST", `/drafts/${draftId}/admission`, {
-        admission: {
-          minPolicyId: admissionTyped.message.minPolicyId,
-          admissionNonce: admissionTyped.message.admissionNonce,
-          expiresAt: admissionTyped.message.expiresAt.toString(),
-          signature: admissionSig,
-        },
-      }),
-      "admission grant",
-    );
+    // 6. Automated admission: a party requests, the risk rules decide and the
+    //    service signs as the admission signer the hub verifies at fund().
+    const admissionRes = checkStatus(await call("POST", `/drafts/${draftId}/admission/request`, {}), "admission request");
+    const admissionSig = admissionRes.admission.signature;
+    if (admissionRes.admission.minPolicyId.toLowerCase() !== bundle.fullTerms.categoryPolicyId.toLowerCase())
+      throw new Error("admission is not bound to the signed category policy");
 
     // 7. Re-fetch: signatures + granted admission must now be IN the bundle.
     const bundle2 = webFunding.parseFundingBundle(

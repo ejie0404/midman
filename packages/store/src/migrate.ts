@@ -254,6 +254,14 @@ CREATE TABLE IF NOT EXISTS auth_kv (
 CREATE INDEX IF NOT EXISTS auth_kv_expiry_idx ON auth_kv(expires_at);
 `;
 
+const MIGRATION_0006 = `-- 0006: wallet-scoped draft discovery (GET /me/deals).
+-- Expression indexes so "drafts where this wallet is creator, buyer or
+-- seller" stays an index scan as the table grows.
+CREATE INDEX IF NOT EXISTS drafts_creator_lower_idx ON drafts (lower(creator_wallet));
+CREATE INDEX IF NOT EXISTS drafts_buyer_lower_idx ON drafts (lower(terms->>'buyer'));
+CREATE INDEX IF NOT EXISTS drafts_seller_lower_idx ON drafts (lower(terms->>'seller'));
+`;
+
 /** The ordered migration set, embedded so no filesystem access is required. */
 export function defaultMigrations(): Migration[] {
   return [
@@ -262,6 +270,7 @@ export function defaultMigrations(): Migration[] {
     { id: "0003_evidence", sql: MIGRATION_0003 },
     { id: "0004_migrations", sql: MIGRATION_0004 },
     { id: "0005_durability", sql: MIGRATION_0005 },
+    { id: "0006_wallet_drafts", sql: MIGRATION_0006 },
   ];
 }
 

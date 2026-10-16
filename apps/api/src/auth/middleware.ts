@@ -176,12 +176,13 @@ async function enforceCreatorOrParty(req: FastifyRequest, deps: PartyDeps, idOrD
 }
 
 async function enforceInvite(req: FastifyRequest, deps: PartyDeps, idOrDealId: string): Promise<void> {
+  const session = requireAuth(req);
   const draft = await resolveDraft(deps, idOrDealId);
   if (!draft) throw httpError(404, "Draft not found");
-  // Anonymous drafting keeps an UNCLAIMED draft: its first invite is open so
-  // the anonymous creator can hand a token to the intended counterparty.
-  if (!draft.creatorWallet) return;
-  const session = requireAuth(req);
+  // Only the creator may issue (and so rotate) an invite. A legacy UNCLAIMED
+  // draft must be claimed first: an open invite would let anyone who learns
+  // the draft id replace the real token and take the counterparty slot.
+  if (!draft.creatorWallet) throw httpError(403, "Draft is unclaimed: claim it before inviting");
   if (draft.creatorWallet.toLowerCase() !== session.wallet.toLowerCase()) {
     throw httpError(403, "Wallet is not the draft creator");
   }
@@ -488,7 +489,7 @@ export function registerAuthGuards(app: FastifyInstance, deps: RouteDeps): void 
     const permission: RoutePermission | undefined = ROUTE_PERMISSIONS[key];
 
     try {
-      // PUBLIC create: bind creatorWallet to the session; anonymous -> unclaimed.
+      // Authenticated create: creatorWallet is always the session wallet.
       if (key === "POST /drafts") {
         const body = req.body;
         if (body && typeof body === "object") {

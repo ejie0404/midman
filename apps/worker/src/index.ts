@@ -242,6 +242,15 @@ async function runPassInner(
   const reconciliation = await reconcile({ reader, hub, usdc: env.usdc });
   if (!reconciliation.ok) counts["alerts"] = 1;
   // Monitoring: metrics + threshold alerts (deduped, non-throwing delivery).
+  // Bound auth-state storage: expired login challenges/nonces are unreadable
+  // already; delete them so unauthenticated issuance cannot grow the table.
+  if (typeof env.store.authPruneExpired === "function") {
+    try {
+      counts["authPruned"] = await env.store.authPruneExpired();
+    } catch {
+      counts["authPruneError"] = 1;
+    }
+  }
   const monitoring = await runMonitoringPass(env, nowSeconds, { sink: makeSinkFromEnv(), extraAlerts: keeperAlerts });
   counts["monitorAlerts"] = monitoring.delivered;
   return counts;

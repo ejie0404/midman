@@ -56,10 +56,11 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RoutePermission>> = Obje
   },
 
   // ---- drafts ----
-  "POST /drafts": { access: "public", note: "anonymous drafting allowed; creator bound to session when present" },
+  "POST /drafts": { access: "authenticated", note: "creator is bound to the session wallet" },
   "POST /drafts/:id/invite": { access: "creator", note: "only the creator may rotate/issue an invite" },
   "POST /drafts/:id/accept": { access: "accept", note: "invitation-token redemption + counterparty assignment" },
   "POST /drafts/:id/claim": { access: "authenticated", note: "binds an unclaimed draft on first authenticated access" },
+  "GET /me/deals": { access: "authenticated", note: "the session wallet's own deals" },
   "GET /drafts/:id/terms": { access: "creator-or-party" },
   "GET /drafts/:id/summary": { access: "creator-or-party" },
   "GET /drafts/:id/download": { access: "creator-or-party" },
@@ -67,6 +68,7 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RoutePermission>> = Obje
   "POST /drafts/:id/signatures": { access: "party" },
   "POST /drafts/:id/deal-signatures": { access: "party" },
   "POST /drafts/:id/admission": { access: "operator", roles: ["admission"] },
+  "POST /drafts/:id/admission/request": { access: "party", note: "automated admission; risk rules decide" },
   "POST /drafts/:id/revoke-note": { access: "party" },
   "POST /drafts/:id/readiness-payload": { access: "party" },
   "GET /drafts/:id/funding-bundle": { access: "party" },

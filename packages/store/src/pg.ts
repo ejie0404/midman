@@ -191,6 +191,19 @@ export class PgStore implements Store {
     return row ? toDraft(row) : null;
   }
 
+  async listDraftsForWallet(wallet: string, limit: number): Promise<DraftRecord[]> {
+    const { rows } = await this.db.query<DraftRow>(
+      `SELECT * FROM drafts
+       WHERE lower(creator_wallet) = lower($1)
+          OR lower(terms->>'buyer') = lower($1)
+          OR lower(terms->>'seller') = lower($1)
+       ORDER BY updated_at DESC
+       LIMIT $2`,
+      [wallet, limit],
+    );
+    return rows.map(toDraft);
+  }
+
   async getDraftByDeal(dealId: string): Promise<DraftRecord | null> {
     const { rows } = await this.db.query<DraftRow>(
       "SELECT * FROM drafts WHERE lower(deal_id) = lower($1) ORDER BY updated_at DESC LIMIT 1",
@@ -689,6 +702,13 @@ export class PgStore implements Store {
 
   async authDelete(scope: string, key: string): Promise<void> {
     await this.db.query("DELETE FROM auth_kv WHERE scope = $1 AND key = $2", [scope, key]);
+  }
+
+  async authPruneExpired(): Promise<number> {
+    const { rows } = await this.db.query(
+      "DELETE FROM auth_kv WHERE expires_at IS NOT NULL AND expires_at <= now() RETURNING scope",
+    );
+    return rows.length;
   }
 
   async authList(scope: string): Promise<AuthStateEntry[]> {

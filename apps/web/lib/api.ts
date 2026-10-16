@@ -277,6 +277,15 @@ export function postDealSignatures(
   return requestFunding<unknown>(`/drafts/${encodeURIComponent(draftId)}/deal-signatures`, "POST", payload, fetchImpl);
 }
 
+/**
+ * POST /drafts/:id/admission/request — ask the automated admission service for
+ * a FundingAdmission (risk rules decide). The grant is stored on the draft and
+ * appears in the next funding bundle.
+ */
+export function requestAdmission(draftId: string, fetchImpl?: typeof fetch): Promise<unknown> {
+  return requestFunding<unknown>(`/drafts/${encodeURIComponent(draftId)}/admission/request`, "POST", {}, fetchImpl);
+}
+
 /** POST /drafts/:id/relay-fund — hand the funding bundle to the sponsored relayer. */
 export function postRelayFund(
   draftId: string,
