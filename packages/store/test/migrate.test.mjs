@@ -62,6 +62,7 @@ describe("defaultMigrations", () => {
       "0003_evidence",
       "0004_migrations",
       "0005_durability",
+      "0006_wallet_drafts",
     ]);
   });
 
@@ -143,6 +144,7 @@ describe("runMigrations", () => {
       "0003_evidence",
       "0004_migrations",
       "0005_durability",
+      "0006_wallet_drafts",
     ]);
   });
 

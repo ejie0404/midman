@@ -102,6 +102,13 @@ export const MIDMAN_POLICIES_ABI = [
   },
   {
     "type": "function",
+    "name": "acceptGovernance",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "admissionSigner",
     "inputs": [],
     "outputs": [
@@ -643,6 +650,19 @@ export const MIDMAN_POLICIES_ABI = [
   },
   {
     "type": "function",
+    "name": "pendingGovernance",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "pendingPanel",
     "inputs": [],
     "outputs": [
@@ -1147,6 +1167,19 @@ export const MIDMAN_POLICIES_ABI = [
         "name": "value",
         "type": "address",
         "indexed": false,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "GovernanceProposed",
+    "inputs": [
+      {
+        "name": "next",
+        "type": "address",
+        "indexed": true,
         "internalType": "address"
       }
     ],

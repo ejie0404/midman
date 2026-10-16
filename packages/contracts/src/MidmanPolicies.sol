@@ -9,6 +9,7 @@ pragma solidity 0.8.26;
 contract MidmanPolicies {
     // ---- Roles ----
     address public governance;
+    address public pendingGovernance;
     address public pauser;
     address public admissionSigner;
     address public treasury;
@@ -143,6 +144,7 @@ contract MidmanPolicies {
     event AddressRotated(bytes32 indexed role, address value);
     event OutageRecorded(uint64 start, uint64 end);
     event OutageAudited(uint80 indexed roundId);
+    event GovernanceProposed(address indexed next);
     event GovernanceTransferred(address indexed next);
 
     error NotGovernance();
@@ -395,10 +397,20 @@ contract MidmanPolicies {
         emit OutageAudited(lastAuditedRound);
     }
 
+    /// @notice Two-step handover: governance nominates, the nominee accepts.
+    /// A mistyped or unreachable address can never take (and brick)
+    /// governance; re-nominating replaces a pending nominee.
     function transferGovernance(address next) external onlyGovernance {
         require(next != address(0), BadAddress());
-        governance = next;
-        emit GovernanceTransferred(next);
+        pendingGovernance = next;
+        emit GovernanceProposed(next);
+    }
+
+    function acceptGovernance() external {
+        require(msg.sender == pendingGovernance, NotGovernance());
+        governance = msg.sender;
+        pendingGovernance = address(0);
+        emit GovernanceTransferred(msg.sender);
     }
 
     // ---- Outage ledger ----

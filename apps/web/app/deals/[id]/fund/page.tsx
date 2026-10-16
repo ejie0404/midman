@@ -1,7 +1,7 @@
 "use client";
 
 import { use, useCallback, useEffect, useState } from "react";
-import { ApiError } from "../../../../lib/api";
+import { ApiError, requestAdmission } from "../../../../lib/api";
 import {
   CHAIN_ID,
   HUB_ADDRESS,
@@ -448,7 +448,7 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
           <div style={card}>
             <h2>Admission authorization</h2>
             <p style={{ fontSize: 14 }}>
-              The hub requires an operator-signed admission. The web never mints admission signatures.
+              Every deal needs a funding approval from Midman before it can be funded. It is checked against deal limits and signed by the server; it cannot move funds.
             </p>
             {bundle.admission.granted ? (
               <p style={mono}>
@@ -463,6 +463,26 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
             <p style={{ fontSize: 13 }}>{bundle.admission.note}</p>
             {!admissionReady ? (
               <>
+                <button
+                  type="button"
+                  style={button}
+                  disabled={working || !bothSigned}
+                  onClick={() => {
+                    if (!draftId) return;
+                    setWorking(true);
+                    setFailure(null);
+                    requestAdmission(draftId)
+                      .then(() => loadBundle(draftId))
+                      .then(() => setDetail("Funding approved. You can fund the deal now."))
+                      .catch((e: unknown) => setFailure(errText(e)))
+                      .finally(() => setWorking(false));
+                  }}
+                >
+                  Get funding approval
+                </button>
+                {!bothSigned ? <p style={{ fontSize: 13 }}>Both parties must sign the deal terms first.</p> : null}
+                <details style={{ marginTop: 12 }}>
+                  <summary style={{ cursor: "pointer", fontSize: 13 }}>Operator: attach a manually signed admission</summary>
                 <textarea
                   value={admissionJson}
                   onChange={(e) => setAdmissionJson(e.target.value)}
@@ -495,6 +515,7 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
                 >
                   Attach admission
                 </button>
+                </details>
               </>
             ) : (
               <span style={{ fontSize: 13 }}>✓ admission ready</span>
@@ -534,7 +555,7 @@ export default function FundPage({ params }: { params: Promise<{ id: string }> }
               Refresh funding status
             </button>
             {!bothSigned ? <div style={warning}>Buyer and seller DealTerms signatures are required.</div> : null}
-            {!admissionReady ? <div style={warning}>Operator-signed admission is required.</div> : null}
+            {!admissionReady ? <div style={warning}>Funding approval is required (Get funding approval above).</div> : null}
             {!readinessReady ? <div style={warning}>Readiness consent signature is required.</div> : null}
           </div>
         </>

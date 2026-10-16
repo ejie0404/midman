@@ -80,6 +80,35 @@ export interface ContractWalletVerifier {
 // hot-path reads avoid an await. The adapter is authoritative on restart.
 const challenges = new Map<string, StoredLoginChallenge>();
 
+/**
+ * Upper bound on cached challenges. Issuance is unauthenticated, so the cache
+ * must not grow without limit: expired entries are swept on issue and, past
+ * the cap, the oldest are evicted (Map iteration is insertion order). An
+ * evicted challenge still verifies from the durable adapter when configured.
+ */
+export const MAX_CACHED_CHALLENGES = 10_000;
+const SWEEP_EVERY = 256;
+let issuedSinceSweep = 0;
+
+function sweepChallenges(now: number): void {
+  if (++issuedSinceSweep >= SWEEP_EVERY) {
+    issuedSinceSweep = 0;
+    for (const [key, entry] of challenges) {
+      if (now >= entry.expiresAt) challenges.delete(key);
+    }
+  }
+  while (challenges.size >= MAX_CACHED_CHALLENGES) {
+    const oldest = challenges.keys().next();
+    if (oldest.done) break;
+    challenges.delete(oldest.value);
+  }
+}
+
+/** Cached challenge count (diagnostics / tests). */
+export function cachedChallengeCount(): number {
+  return challenges.size;
+}
+
 /** 32-byte hex nonce (bytes32, per the frozen LoginChallenge schema). */
 export function newChallengeNonce(): Hash {
   return `0x${randomBytes(32).toString("hex")}` as Hash;
@@ -134,6 +163,7 @@ export function issueLoginChallenge(params: {
   const uri = params.uri ?? loginUri(params.domain);
   const challenge = buildLoginChallenge(params.domain, params.chainId, params.wallet, nonce, expiresAt);
   const stored: StoredLoginChallenge = { ...challenge, issuedAt: now, uri, consumed: false };
+  sweepChallenges(now);
   challenges.set(nonce.toLowerCase(), stored);
   // Durable mirror; issuance stays synchronous (fire-and-forget write-through).
   void getAuthPersistence().putChallenge(nonce.toLowerCase(), toPersisted(stored));
@@ -274,5 +304,6 @@ export async function verifyLoginSignature(params: {
 /** Test helper: clear all issued challenges and restore a fresh adapter. */
 export function __resetChallengesForTests(): void {
   challenges.clear();
+  issuedSinceSweep = 0;
   setAuthPersistence(new MemoryAuthPersistence());
 }

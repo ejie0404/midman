@@ -108,6 +108,8 @@ function constantTimeHexEqual(a: string, b: string): boolean {
   }
 }
 
+const MEMORY_CHALLENGE_CAP = 20_000;
+
 /** In-memory adapter (default). Also the fallback when no durable adapter is set. */
 export class MemoryAuthPersistence implements AuthPersistence {
   private readonly challenges = new Map<string, PersistedChallenge>();
@@ -117,6 +119,13 @@ export class MemoryAuthPersistence implements AuthPersistence {
   private readonly assignmentAuditAll: AssignmentAuditEntry[] = [];
 
   async putChallenge(nonce: string, challenge: PersistedChallenge): Promise<void> {
+    // Bounded like the challenge cache: unauthenticated issuance must not
+    // grow memory without limit (oldest evicted first).
+    while (this.challenges.size >= MEMORY_CHALLENGE_CAP) {
+      const oldest = this.challenges.keys().next();
+      if (oldest.done) break;
+      this.challenges.delete(oldest.value);
+    }
     this.challenges.set(nonce.toLowerCase(), { ...challenge });
   }
 

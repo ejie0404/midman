@@ -1,6 +1,7 @@
 // HTTP surface for Phase 6: drafts, signatures, admission, relay outbox,
 // chain-first financial reads, recovery exports, indexer operations.
 // Contract state is authoritative; projections are labeled as such.
+import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { Address, Hash } from "viem";
 import { createViemReader, buildRecoveryPackage, confirmationLevel, PHASE_NAMES, type ChainReader } from "@midman/chain";
@@ -30,6 +31,7 @@ import {
 import { buildFundingBundle, storeDealSignature } from "./funding.js";
 import { dealParty } from "./evidence/access.js";
 import { resolveDraftBinding } from "./dealsMeta.js";
+import { requestAdmission } from "./admission/service.js";
 
 export interface RouteDeps {
   readonly store: Store;
@@ -87,7 +89,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       if (!binding.ok) return reply.code(503).send(bad(binding.error));
       const nowSeconds = Math.floor(Date.now() / 1_000);
       const terms = buildCanonicalTerms(binding.input, nowSeconds);
-      const id = `draft_${terms["dealId"]!.slice(2, 14)}`;
+      // Opaque, unguessable draft id (128 random bits), independent of dealId.
+      const id = `draft_${randomBytes(16).toString("hex")}`;
       await deps.store.createDraft({
         id,
         dealId: terms["dealId"]!,
@@ -189,6 +192,13 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     await deps.store.updateDraft(draft.id, { admission, status: "admitted" });
     auditLog({ actor: "admission", action: "draft.admission", dealId: draft.dealId });
     return { ok: true };
+  });
+
+  // Automated admission: a party asks, the risk rules decide, the service signs.
+  app.post<{ Params: { id: string } }>("/drafts/:id/admission/request", async (request, reply) => {
+    const decision = await requestAdmission(deps, request.params.id);
+    if (!decision.ok) return reply.code(decision.status).send(bad(decision.reason));
+    return { ok: true, admission: decision.admission, reused: decision.reused };
   });
 
   app.post<{ Params: { id: string }; Body: Record<string, unknown> }>("/drafts/:id/revoke-note", async (request, reply) => {

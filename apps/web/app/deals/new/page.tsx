@@ -19,6 +19,7 @@ import {
   type DealDefaults,
 } from "../../../lib/dealDefaults";
 import { button, card, error, input, label, mono, ok, page, secondaryButton, warning } from "../../components/styles";
+import { useSession } from "../../components/useSession";
 
 function toSeconds(hours: string): number | null {
   if (!/^\d+(\.\d+)?$/.test(hours.trim())) return null;
@@ -29,6 +30,7 @@ function toSeconds(hours: string): number | null {
 export default function NewDealPage() {
   const [role, setRole] = useState<"buyer" | "seller">("buyer");
   const [creatorWallet, setCreatorWallet] = useState("");
+  const { session, connect } = useSession();
   const [counterparty, setCounterparty] = useState("");
   const [counterpartyHint, setCounterpartyHint] = useState("");
   const [principal, setPrincipal] = useState("100");
@@ -108,15 +110,24 @@ export default function NewDealPage() {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      if (!isHexAddress(creatorWallet)) throw new Error("Creator wallet must be a 0x address");
+      // Drafts are created by a signed-in wallet (the API binds the creator to
+      // the session). Sign in first when needed; the session wallet is the
+      // creator, whatever was typed in the field.
+      const active =
+        session && creatorWallet !== "" && session.wallet.toLowerCase() === creatorWallet.toLowerCase()
+          ? session
+          : await connect();
+      const signedInWallet = active.wallet;
+      setCreatorWallet(signedInWallet);
+      if (!isHexAddress(signedInWallet)) throw new Error("Creator wallet must be a 0x address");
       if (!isHexAddress(counterparty)) throw new Error("Counterparty must be a 0x address");
       if (!defaults) throw new Error(defaultsError ?? "Verified deal configuration is not loaded yet");
       if (!preview || "error" in preview || !preview.principalUnits) throw new Error(preview?.error ?? "Invalid preview");
       const deliverySeconds = toSeconds(deliveryHours);
       const inspectionSeconds = toSeconds(inspectionHours);
       if (deliverySeconds === null || inspectionSeconds === null) throw new Error("Invalid durations");
-      const buyer = (role === "buyer" ? creatorWallet : counterparty) as Address;
-      const seller = (role === "buyer" ? counterparty : creatorWallet) as Address;
+      const buyer = (role === "buyer" ? signedInWallet : counterparty) as Address;
+      const seller = (role === "buyer" ? counterparty : signedInWallet) as Address;
       const agreementHash = keccak256(stringToHex(description.trim() === "" ? `midman:${Date.now()}` : description));
       // Agreement binding comes ONLY from verified configuration: real hub,
       // USDC, chain id, the eight policy ids, and the configured recipients.
@@ -139,7 +150,7 @@ export default function NewDealPage() {
         fundingDays: 7,
       };
       const body: { creatorWallet: string; terms: Record<string, unknown>; counterpartyHint?: string } = {
-        creatorWallet,
+        creatorWallet: signedInWallet,
         terms: terms as unknown as Record<string, unknown>,
       };
       if (counterpartyHint.trim() !== "") body.counterpartyHint = counterpartyHint.trim();

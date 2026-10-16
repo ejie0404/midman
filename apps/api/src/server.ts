@@ -1,10 +1,12 @@
 import { pathToFileURL } from "node:url";
-import Fastify from "fastify";
+import Fastify, { type FastifyServerOptions } from "fastify";
 import { closeStore, createRegistry, hasAuthStateStore, hasKvStore, migrateStore } from "@midman/store";
 import { loadConfig, type AppConfig } from "./config.js";
 import { createStoreFromEnv, type Store } from "./db.js";
 import { buildDeps, registerRoutes, type RouteDeps } from "./routes.js";
+import { loggerFromEnv, registerHttpHardening, trustProxyFromEnv } from "./http/hardening.js";
 import { registerDealMetaRoutes } from "./dealsMeta.js";
+import { registerMeRoutes } from "./me.js";
 import { registerEvidenceRoutes } from "./evidence/routes.js";
 import { registerAuthGuards, registerAuthRoutes } from "./auth/middleware.js";
 import { createStoreAuthPersistence, setAuthPersistence } from "./auth/persistence.js";
@@ -37,6 +39,8 @@ export interface ServerOptions {
   readonly store?: Store;
   /** Run store migrations on boot. Defaults to true when DATABASE_URL is set. */
   readonly runMigrations?: boolean;
+  /** Per-IP rate limits. Defaults to true when NODE_ENV=production or RATE_LIMIT_ENABLE=1. */
+  readonly rateLimit?: boolean;
 }
 
 /**
@@ -70,7 +74,14 @@ export function buildServer(options: ServerOptions = {}) {
   const config = loadConfig();
   const store = options.store ?? createStoreFromEnv();
   const deps = buildDeps(store);
-  const app = Fastify({ logger: false });
+  const logger = loggerFromEnv();
+  const app = Fastify({
+    logger: logger === false ? false : (logger as FastifyServerOptions["logger"] & object),
+    trustProxy: trustProxyFromEnv(),
+  });
+
+  // Rate limits run first (onRequest), before any auth or handler work.
+  registerHttpHardening(app, options.rateLimit !== undefined ? { rateLimit: options.rateLimit } : {});
 
   const enforceAuth =
     options.auth ?? (process.env["MIDMAN_AUTH_ENFORCE"] === "1" || process.env["NODE_ENV"] === "production");
@@ -86,6 +97,7 @@ export function buildServer(options: ServerOptions = {}) {
   registerCommitmentRoutes(app, deps);
   registerReviewRoutes(app, deps);
   registerAuthRoutes(app, deps);
+  registerMeRoutes(app, deps);
 
   app.get("/health", async () => ({
     ok: true,

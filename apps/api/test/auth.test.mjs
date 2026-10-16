@@ -116,10 +116,16 @@ async function signedHeaders(account, method, url, bodyBytes = Buffer.alloc(0)) 
   return { "x-wallet-address": account.address, "x-wallet-expiry": expiry, "x-wallet-signature": signature };
 }
 
+/** Draft id -> creator session cookie (drafts are created by a signed-in wallet). */
+const creatorCookies = new Map();
+
 async function createDraft(app) {
-  const res = await app.inject({ method: "POST", url: "/drafts", payload: draftBody() });
+  const { cookie } = await signIn(app, buyer);
+  const res = await app.inject({ method: "POST", url: "/drafts", headers: { cookie }, payload: draftBody() });
   assert.equal(res.statusCode, 200, JSON.stringify(res.json()));
-  return res.json();
+  const created = res.json();
+  creatorCookies.set(created.id, cookie);
+  return created;
 }
 
 beforeEach(() => {
@@ -330,7 +336,7 @@ describe("login signature is sign-in only, never financial/request auth", () => 
   it("a login signature cannot satisfy an EIP-712 acceptance signature", async () => {
     const { app } = makeApp();
     const { id, terms } = await createDraft(app);
-    await app.inject({ method: "POST", url: `/drafts/${id}/invite` });
+    await app.inject({ method: "POST", url: `/drafts/${id}/invite`, headers: { cookie: creatorCookies.get(id) } });
     const { cookie, signature: loginSignature } = await signIn(app, seller);
     const res = await app.inject({
       method: "POST",
@@ -347,7 +353,7 @@ describe("draft accept requires the invited party + a valid invitation token", (
   it("rejects accept without an invitation token (403)", async () => {
     const { app } = makeApp();
     const { id } = await createDraft(app);
-    await app.inject({ method: "POST", url: `/drafts/${id}/invite` });
+    await app.inject({ method: "POST", url: `/drafts/${id}/invite`, headers: { cookie: creatorCookies.get(id) } });
     const { cookie } = await signIn(app, seller);
     const res = await app.inject({
       method: "POST",
@@ -361,7 +367,7 @@ describe("draft accept requires the invited party + a valid invitation token", (
   it("rejects accept with a wrong token (403)", async () => {
     const { app } = makeApp();
     const { id } = await createDraft(app);
-    await app.inject({ method: "POST", url: `/drafts/${id}/invite` });
+    await app.inject({ method: "POST", url: `/drafts/${id}/invite`, headers: { cookie: creatorCookies.get(id) } });
     const { cookie } = await signIn(app, seller);
     const res = await app.inject({
       method: "POST",
@@ -375,7 +381,7 @@ describe("draft accept requires the invited party + a valid invitation token", (
   it("accepts with the invited wallet + valid token (200)", async () => {
     const { app } = makeApp();
     const { id } = await createDraft(app);
-    const invite = (await app.inject({ method: "POST", url: `/drafts/${id}/invite` })).json();
+    const invite = (await app.inject({ method: "POST", url: `/drafts/${id}/invite`, headers: { cookie: creatorCookies.get(id) } })).json();
     const { cookie } = await signIn(app, seller);
     const res = await app.inject({
       method: "POST",
@@ -390,7 +396,7 @@ describe("draft accept requires the invited party + a valid invitation token", (
   it("rejects accept by a wallet that is not the invited counterparty (403)", async () => {
     const { app } = makeApp();
     const { id } = await createDraft(app);
-    const invite = (await app.inject({ method: "POST", url: `/drafts/${id}/invite` })).json();
+    const invite = (await app.inject({ method: "POST", url: `/drafts/${id}/invite`, headers: { cookie: creatorCookies.get(id) } })).json();
     const { cookie } = await signIn(app, outsider);
     const res = await app.inject({
       method: "POST",

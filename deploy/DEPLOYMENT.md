@@ -114,7 +114,7 @@ The script:
 | CATASTROPHIC | `keccak256("MIDMAN.CATASTROPHIC.v1")` | `keccak256("MIDMAN.CATASTROPHIC.content.v1")` |
 
 > If governance is a foreign timelock (not the broadcaster), deploy first, then
-> `transferGovernance(timelock)`, then register the 8 policies from that address.
+> `transferGovernance(timelock)` and `acceptGovernance()` from the timelock, then register the 8 policies from that address.
 > The `keccak256("...content.v1")` values above are the script's placeholder
 > inputs. The frozen release records the real content hashes computed from
 > `deploy/policies/*.json` by `scripts/policy-hash.mjs` — the same hashes the
@@ -155,7 +155,7 @@ The script:
    `packages/contracts/test/DigestParity.t.sol`; `actionDigest` must match the
    off-chain builder.
 5. **Transfer roles to the timelock/multisig.** If the broadcaster was an EOA,
-   `transferGovernance(timelock)` and hand over `PAUSER`, `ADMISSION_SIGNER`,
+   `transferGovernance(timelock)`, have the timelock call `acceptGovernance()`, and hand over `PAUSER`, `ADMISSION_SIGNER`,
    `TREASURY`. Confirm pauser ≠ governance, admission signer cannot settle,
    primary/fallback panels are disjoint, and veto signer set is independent.
 6. **Fund nothing until the checklist is green.** `fund` stays paused

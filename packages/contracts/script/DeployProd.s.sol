@@ -16,7 +16,8 @@ pragma solidity 0.8.26;
 //   * The broadcaster MUST equal GOVERNANCE: policy registration is
 //     governance-only and happens in the same broadcast as the deployment.
 //     To hand governance to a multisig, deploy with GOVERNANCE = deployer and
-//     call transferGovernance afterwards.
+//     call transferGovernance afterwards and acceptGovernance from the new
+//     governance (two-step handover).
 //
 // Policy content hashes MUST come from scripts/policy-hash.mjs, which hashes
 // the canonical records under deploy/policies/*.json. They are registered

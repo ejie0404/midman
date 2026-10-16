@@ -192,7 +192,7 @@ describe("route-permission register coverage", () => {
     const keys = getRegisteredRouteKeys(app);
     assert.ok(keys.length > 10, `expected many registered routes, got ${keys.length}`);
     assert.deepEqual(missingRoutePermissions(keys), [], "every registered route must have a permission entry");
-    assert.equal(ROUTE_PERMISSIONS["POST /drafts"].access, "public");
+    assert.equal(ROUTE_PERMISSIONS["POST /drafts"].access, "authenticated");
     assert.equal(ROUTE_PERMISSIONS["POST /auth/verify"].access, "public");
     assert.equal(ROUTE_PERMISSIONS["GET /drafts/:id/terms"].access, "creator-or-party");
     assert.equal(ROUTE_PERMISSIONS["POST /review/cases/:dealId/assign"].access, "assignment");
@@ -236,22 +236,38 @@ describe("draft identity binding + claim", () => {
     await app.close();
   });
 
-  it("creates an UNCLAIMED draft anonymously, then binds it on first claim", async () => {
+  it("rejects anonymous draft creation and anonymous invites on legacy unclaimed drafts", async () => {
     const { app, store } = makeApp();
     const res = await app.inject({ method: "POST", url: "/drafts", payload: draftBody() });
-    assert.equal(res.statusCode, 200);
-    const { id } = res.json();
-    assert.equal((await store.getDraft(id)).creatorWallet, "");
+    assert.equal(res.statusCode, 401);
 
+    // A legacy UNCLAIMED draft (created before drafting required a session):
+    // nobody may issue its invite until it is claimed, then only the claimer.
     const { cookie } = await signIn(app, buyer);
+    const created = await app.inject({ method: "POST", url: "/drafts", headers: { cookie }, payload: draftBody() });
+    const { id } = created.json();
+    await store.updateDraft(id, { creatorWallet: "" });
+    const { cookie: outsiderCookie } = await signIn(app, outsider);
+    const openInvite = await app.inject({ method: "POST", url: `/drafts/${id}/invite`, headers: { cookie: outsiderCookie } });
+    assert.equal(openInvite.statusCode, 403);
+
     const claim = await app.inject({ method: "POST", url: `/drafts/${id}/claim`, headers: { cookie } });
     assert.equal(claim.statusCode, 200, JSON.stringify(claim.json()));
     assert.equal(claim.json().claimed, true);
-    assert.equal((await store.getDraft(id)).creatorWallet, buyer.address);
-
-    const { cookie: outsiderCookie } = await signIn(app, outsider);
     const second = await app.inject({ method: "POST", url: `/drafts/${id}/claim`, headers: { cookie: outsiderCookie } });
     assert.equal(second.statusCode, 403);
+    const invite = await app.inject({ method: "POST", url: `/drafts/${id}/invite`, headers: { cookie } });
+    assert.equal(invite.statusCode, 200);
+    await app.close();
+  });
+
+  it("issues opaque 128-bit draft ids unrelated to the deal id", async () => {
+    const { app } = makeApp();
+    const { cookie } = await signIn(app, buyer);
+    const res = await app.inject({ method: "POST", url: "/drafts", headers: { cookie }, payload: draftBody() });
+    const { id, dealId } = res.json();
+    assert.match(id, /^draft_[0-9a-f]{32}$/);
+    assert.ok(!dealId.toLowerCase().includes(id.slice(6)), "draft id is not derived from the deal id");
     await app.close();
   });
 });
@@ -259,7 +275,8 @@ describe("draft identity binding + claim", () => {
 describe("agreement endpoint access", () => {
   it("rejects anonymous and unrelated-wallet reads of draft terms", async () => {
     const { app } = makeApp();
-    const created = await app.inject({ method: "POST", url: "/drafts", payload: draftBody() });
+    const { cookie: creatorCookie } = await signIn(app, buyer);
+    const created = await app.inject({ method: "POST", url: "/drafts", headers: { cookie: creatorCookie }, payload: draftBody() });
     const { id } = created.json();
     assert.equal((await app.inject({ method: "GET", url: `/drafts/${id}/terms` })).statusCode, 401);
 
@@ -277,7 +294,8 @@ describe("agreement endpoint access", () => {
 
   it("denies a non-party signing attempt and allows the party", async () => {
     const { app } = makeApp();
-    const created = await app.inject({ method: "POST", url: "/drafts", payload: draftBody() });
+    const { cookie: creatorCookie } = await signIn(app, buyer);
+    const created = await app.inject({ method: "POST", url: "/drafts", headers: { cookie: creatorCookie }, payload: draftBody() });
     const { id } = created.json();
     const { cookie: outsiderCookie } = await signIn(app, outsider);
     const denied = await app.inject({

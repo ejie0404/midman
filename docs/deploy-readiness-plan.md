@@ -73,6 +73,22 @@ disjoint, hardware-backed); Safe multisig governance; bug bounty; legal review
 Decide panel size now: if you cannot staff 13 people, change the floors
 before the audit, not after.
 
+## Progress
+
+- **Phase 1 (done, PR #1):** phase-aware outage watermark + feed reseed,
+  worker outage keeper with `outage_watermark_behind` alert, server-pinned
+  draft binding.
+- **Phase 2 (done):** automated admission service
+  (`POST /drafts/:id/admission/request`, caps/denylist/pair cap/kill switch;
+  the fund page now has a "Get funding approval" button); per-IP rate limits,
+  security headers (API + web), structured redacted logs, `TRUST_PROXY`;
+  bounded login-challenge cache + expired auth-state pruning; drafts require
+  a session, draft ids are 128-bit random, invites are creator-only;
+  `GET /me/deals`; two-step governance transfer.
+  Still open from Phase 2: deadline notifications (needs an email/Telegram
+  provider choice) and smart-wallet signatures (USDC `bytes` 3009 overload,
+  ERC-6492), which moves to the wallet work in Phase 3.
+
 ## Phases
 
 1. **Critical fixes.** Watermark successor logic across phases, feed reseed,
