@@ -25,6 +25,7 @@ import { CapacityMeter, assess, pauseRecommendation } from "./capacity/capacity.
 import { runAllDrills } from "./drills/index.js";
 import { restoreDrillWithLocalStore } from "./drills/restore.js";
 import { outageDrill, simulatedOutageDeps } from "./drills/outage.js";
+import { keeperFromEnv, runOutageKeeper, type KeeperMemory } from "./outage/keeper.js";
 
 export const QUEUES = ["reminders", "relay", "reconciliation", "progression"] as const;
 export type QueueName = (typeof QUEUES)[number];
@@ -147,6 +148,9 @@ export async function drainRelayOnce(
 // In-process single-flight guard: timer passes never overlap. A pass that
 // arrives while one is running is dropped (counted as `overlapped`), and DB
 // leases still guard the multi-worker case.
+const keeperMemory: KeeperMemory = { behindSince: null };
+let keeperWiring: ReturnType<typeof keeperFromEnv> | null = null;
+
 let passRunning = false;
 
 /** True while a worker pass is executing in this process (test/diagnostic). */
@@ -218,13 +222,27 @@ async function runPassInner(
   counts["relayProcessing"] = recovery["processing"] ?? 0;
   counts["relaySubmitted"] = recovery["submitted"] ?? 0;
   counts["relayFailed"] = recovery["failed"] ?? 0;
+  // Outage keeper before progression: a lagging watermark makes every
+  // time-derived hub action revert with OutageUnknown.
+  const rpcUrls = (process.env["BASE_RPC_URLS"] ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  let keeperAlerts: Awaited<ReturnType<typeof runOutageKeeper>>["alerts"] = [];
+  if (rpcUrls.length > 0) {
+    keeperWiring ??= keeperFromEnv(rpcUrls, hub);
+    const keeper = await runOutageKeeper({ ...keeperWiring, memory: keeperMemory, nowSeconds });
+    counts["outageKeeperSubmitted"] = keeper.submitted.length;
+    if (keeper.status === "behind" || keeper.status === "unknown") counts["outageWatermarkBehind"] = 1;
+    keeperAlerts = keeper.alerts;
+  }
   counts["progression"] = (await progressionPass({ store: env.store, reader, hub, nowSeconds })).length;
   counts["escape"] = (await escapePass({ store: env.store, reader, hub, nowSeconds })).length;
   counts["reminders"] = (await remindersPass({ store: env.store, reader, hub, nowSeconds })).length;
   const reconciliation = await reconcile({ reader, hub, usdc: env.usdc });
   if (!reconciliation.ok) counts["alerts"] = 1;
   // Monitoring: metrics + threshold alerts (deduped, non-throwing delivery).
-  const monitoring = await runMonitoringPass(env, nowSeconds, { sink: makeSinkFromEnv() });
+  const monitoring = await runMonitoringPass(env, nowSeconds, { sink: makeSinkFromEnv(), extraAlerts: keeperAlerts });
   counts["monitorAlerts"] = monitoring.delivered;
   return counts;
 }

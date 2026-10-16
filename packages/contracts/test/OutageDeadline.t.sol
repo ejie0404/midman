@@ -12,7 +12,8 @@ import {DealTerms, OutageUnknown, TooEarly, TooLate, BadPhase} from "../src/Deal
 /// and the availability semantics.
 ///
 /// Coverage model: reportOutage consumes only the next un-audited feed round
-/// (`roundId == lastAuditedRound + 1`) together with its recovery, so rounds are
+/// (`successorRound(lastAuditedRound)`, see WatermarkPhase.t.sol for phase
+/// jumps) together with its recovery, so rounds are
 /// reported in the consecutive order the feed mints them (2, 4, 6, ... given the
 /// MockFeed's head starts at round 1). An unreported transition leaves the
 /// watermark behind the head and deadline math reports history UNKNOWN.

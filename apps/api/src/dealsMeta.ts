@@ -116,6 +116,79 @@ export function buildDealDefaults(
   };
 }
 
+/** Client-supplied draft fields that the server overrides from the deployment. */
+export interface DraftBindingFields {
+  readonly category: string;
+  readonly hub: string;
+  readonly token: string;
+  readonly chainId: number;
+  readonly policyIds: Record<string, string>;
+  readonly platformFeeRecipient: string;
+  readonly arbitrationCostRecipient: string;
+}
+
+export type DraftBindingResult<T> = { ok: true; input: T; pinned: boolean } | { ok: false; error: string };
+
+let warnedUnpinned = false;
+
+/**
+ * Optional per-category on-chain policy ids (MIDMAN_CATEGORY_POLICY_IDS, a JSON
+ * map of category name -> bytes32), so the signed categoryPolicyId matches the
+ * declared category's registered minimum. Falls back to policyIds.category.
+ */
+export function categoryPolicyIdFor(category: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  const map = parseJsonObject(env["MIDMAN_CATEGORY_POLICY_IDS"], "MIDMAN_CATEGORY_POLICY_IDS");
+  const id = map[category];
+  if (id === undefined) return null;
+  return requireHash(id, `MIDMAN_CATEGORY_POLICY_IDS.${category}`);
+}
+
+/**
+ * Pin every economic/binding field of a new draft to the deployment's
+ * verified defaults: fee and arbitration-cost recipients, hub, token, chain id
+ * and all policy ids. Client values for these fields are never trusted (a
+ * creator could otherwise route the platform fee or arbitration costs to
+ * themselves, or select a weaker category policy than the one displayed).
+ *
+ * Production fails closed when the defaults are not configured. Outside
+ * production, an unconfigured deployment keeps the client's values so local
+ * development and fixture-driven tests work without env.
+ */
+export function resolveDraftBinding<T extends DraftBindingFields>(
+  input: T,
+  env: NodeJS.ProcessEnv = process.env,
+): DraftBindingResult<T> {
+  let defaults: DealDefaults;
+  let categoryPolicy: string | null;
+  try {
+    defaults = buildDealDefaults(env);
+    categoryPolicy = categoryPolicyIdFor(String(input.category), env);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "Deal defaults unavailable";
+    if (env["NODE_ENV"] === "production") {
+      return { ok: false, error: `Deal configuration unavailable: ${reason}` };
+    }
+    if (!warnedUnpinned) {
+      warnedUnpinned = true;
+      console.warn(`[drafts] deal defaults not configured (${reason}); using client binding (development only)`);
+    }
+    return { ok: true, input, pinned: false };
+  }
+  return {
+    ok: true,
+    pinned: true,
+    input: {
+      ...input,
+      hub: defaults.hub,
+      token: defaults.usdc,
+      chainId: defaults.chainId,
+      policyIds: { ...defaults.policyIds, ...(categoryPolicy !== null ? { category: categoryPolicy } : {}) },
+      platformFeeRecipient: defaults.platformFeeRecipient,
+      arbitrationCostRecipient: defaults.arbitrationCostRecipient,
+    },
+  };
+}
+
 /**
  * Register GET /config/deal-defaults. Public: it carries no private data, only
  * the deployment's verified public binding. (server.ts owns the final wiring;

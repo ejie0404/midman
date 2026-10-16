@@ -5,7 +5,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test test/security.test.mjs test/api.test.mjs test/journey.test.mjs test/evidence.test.mjs test/categories.test.mjs test/review.test.mjs test/acceptance.test.mjs test/auth.test.mjs test/funding.test.mjs test/indexer-reorg.test.mjs test/evidence-hardening.test.mjs test/durability.test.mjs test/authorization.test.mjs test/evidence-phase6.test.mjs test/phase4.test.mjs test/indexer-phase5.test.mjs test/health.test.mjs",
+    "test": "node --test test/security.test.mjs test/api.test.mjs test/journey.test.mjs test/evidence.test.mjs test/categories.test.mjs test/review.test.mjs test/acceptance.test.mjs test/auth.test.mjs test/funding.test.mjs test/indexer-reorg.test.mjs test/evidence-hardening.test.mjs test/durability.test.mjs test/authorization.test.mjs test/evidence-phase6.test.mjs test/phase4.test.mjs test/indexer-phase5.test.mjs test/health.test.mjs test/draft-binding.test.mjs",
     "start": "node dist/server.js",
     "db:migrate": "node dist/db/migrate.js"
   },

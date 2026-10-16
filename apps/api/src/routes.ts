@@ -29,6 +29,7 @@ import {
 } from "./chainActions.js";
 import { buildFundingBundle, storeDealSignature } from "./funding.js";
 import { dealParty } from "./evidence/access.js";
+import { resolveDraftBinding } from "./dealsMeta.js";
 
 export interface RouteDeps {
   readonly store: Store;
@@ -80,10 +81,12 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   app.post<{ Body: Record<string, unknown> }>("/drafts", async (request, reply) => {
     try {
       const body = request.body;
-      const input = body["terms"] as DraftTermsInput;
-      if (!input || typeof input !== "object") return reply.code(400).send(bad("Missing terms"));
+      const raw = body["terms"] as DraftTermsInput;
+      if (!raw || typeof raw !== "object") return reply.code(400).send(bad("Missing terms"));
+      const binding = resolveDraftBinding(raw);
+      if (!binding.ok) return reply.code(503).send(bad(binding.error));
       const nowSeconds = Math.floor(Date.now() / 1_000);
-      const terms = buildCanonicalTerms(input, nowSeconds);
+      const terms = buildCanonicalTerms(binding.input, nowSeconds);
       const id = `draft_${terms["dealId"]!.slice(2, 14)}`;
       await deps.store.createDraft({
         id,

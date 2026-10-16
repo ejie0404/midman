@@ -5,7 +5,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test test/worker.test.mjs test/monitoring.test.mjs test/monitoring-truth.test.mjs test/reliability.test.mjs test/capacity.test.mjs test/hardening.test.mjs test/phase5.test.mjs",
+    "test": "node --test test/worker.test.mjs test/monitoring.test.mjs test/monitoring-truth.test.mjs test/reliability.test.mjs test/capacity.test.mjs test/hardening.test.mjs test/phase5.test.mjs test/outage-keeper.test.mjs",
     "start": "node dist/index.js"
   },
   "dependencies": {
