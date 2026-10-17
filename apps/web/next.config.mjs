@@ -20,13 +20,20 @@ function apiOrigin() {
   return raw.trim().replace(/\/+$/, "");
 }
 
+// Next's dev runtime (React Fast Refresh) evaluates code with eval(), so only
+// the dev server gets 'unsafe-eval'. Production never does.
+const SCRIPT_SRC =
+  process.env.NODE_ENV === "development"
+    ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+    : "script-src 'self' 'unsafe-inline'";
+
 // Security headers for every page. The app asks users to sign financial
 // actions, so framing is forbidden outright (clickjacking). CSP keeps scripts
 // same-origin; 'unsafe-inline' is needed for Next's inline bootstrap and the
 // inline style attributes. connect-src allows https/wss for wallet RPCs.
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline'",
+  SCRIPT_SRC,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
